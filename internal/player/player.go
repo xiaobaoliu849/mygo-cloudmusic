@@ -37,6 +37,11 @@ type Player struct {
 	// Records reports whether the listener records themselves singing a
 	// line along with it: it plays again then, at no volume if Guide is 0.
 	Records func() bool
+	// Coached reports whether a teacher runs the lesson, saying what comes
+	// after a line: it plays once and pauses, with no pass to sing along,
+	// whatever Guide and Records say. Sung along with, it plays as loud as
+	// Guide says.
+	Coached func() bool
 	// SingAlong, if set, hears a lesson's line start and stop playing for
 	// the listener to sing along with it, as to record them. Stopping, the
 	// player has paused already, unless the line plays on, looping.
@@ -65,7 +70,7 @@ type Player struct {
 	track   *netease.Track
 	out     *audio.Player
 	stream  stream
-	shift   *shifter // between the stream and out, for a lesson's tempo
+	shift   *shifter        // between the stream and out, for a lesson's tempo
 	info    *netease.Stream // what the current track streams
 	fade    fader
 	gain    float64 // the current track's normalizing gain

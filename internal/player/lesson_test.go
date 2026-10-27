@@ -320,3 +320,27 @@ func TestPlayUnderAtTakeTempo(t *testing.T) {
 		t.Errorf("paused at %v, want 300ms of the song", pos)
 	}
 }
+
+// Coached, a line plays once and pauses, with no pass to sing along;
+// sung along with, through the song, it plays as loud as Guide says. It
+// used to go silent: the app made Guide 0 to drop the pass.
+func TestCoachedLine(t *testing.T) {
+	ch, p := posted()
+	defer p.out.Close()
+	p.SetLyrics(lessonLines)
+	p.Guide = func() float64 { return 0.25 }
+	p.Records = func() bool { return true }
+	p.Coached = func() bool { return true }
+	var heard []bool
+	p.SingAlong = func(on bool) { heard = append(heard, on) }
+	full := p.fade.gain
+	p.PlayLine(0)
+	until(t, ch, func() bool { return !p.Playing() })
+	if len(heard) != 0 || p.SingingAlong() {
+		t.Errorf("played again to sing along: heard %v", heard)
+	}
+	p.SingThrough(0)
+	if g := p.fade.gain; !p.SingingAlong() || g != full*0.25 {
+		t.Errorf("sung through at %v, want %v", g, full*0.25)
+	}
+}

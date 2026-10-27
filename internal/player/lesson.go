@@ -118,6 +118,9 @@ func (p *Player) guide() float64 {
 // records reports whether the listener records themselves singing along.
 func (p *Player) records() bool { return p.Records != nil && p.Records() }
 
+// coached reports whether a teacher runs the lesson.
+func (p *Player) coached() bool { return p.Coached != nil && p.Coached() }
+
 // setAlong says whether the line plays for the listener to sing along,
 // telling SingAlong of a change.
 func (p *Player) setAlong(on bool) {
@@ -304,7 +307,7 @@ func (p *Player) lineEnded() {
 		p.StopLine()
 		return
 	}
-	if !p.lesson.along && (p.guide() > 0 || p.records()) {
+	if !p.lesson.along && !p.coached() && (p.guide() > 0 || p.records()) {
 		p.setAlong(true)
 		p.applyGain()
 		p.fromLine()
