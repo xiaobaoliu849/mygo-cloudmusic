@@ -134,3 +134,32 @@ func (f *biquad) next(x float64) float64 {
 	f.x2, f.x1, f.y2, f.y1 = f.x1, x, f.y1, y
 	return y
 }
+
+// A Downsampler brings what the microphone hears, at Rate, down to a
+// rate Rate is a whole number of times, filtering out first what is too
+// high for that rate to hold, from one call to the next of a recording.
+type Downsampler struct {
+	by, at int
+	lp     [2]*biquad
+}
+
+// NewDownsampler returns a Downsampler to rate, which must divide Rate.
+func NewDownsampler(rate int) *Downsampler {
+	// Well short of half the rate, twice over, for a steeper fall past
+	// it: a voice is heard, and understood, by what is below.
+	cut := 0.35 * float64(rate)
+	return &Downsampler{by: Rate / rate, lp: [2]*biquad{newBiquad(Rate, cut, false), newBiquad(Rate, cut, false)}}
+}
+
+// Next returns samples at Rate brought down, going on from the last.
+func (d *Downsampler) Next(samples []float32) []float32 {
+	out := make([]float32, 0, len(samples)/d.by+1)
+	for _, s := range samples {
+		v := d.lp[1].next(d.lp[0].next(float64(s)))
+		if d.at == 0 {
+			out = append(out, float32(v))
+		}
+		d.at = (d.at + 1) % d.by
+	}
+	return out
+}

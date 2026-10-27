@@ -88,3 +88,34 @@ func TestAlignNothing(t *testing.T) {
 		t.Errorf("matched at %v", lag)
 	}
 }
+
+// Brought down to 16 kHz, a voice's tone keeps its loudness, chunk after
+// chunk as the microphone gives them, while a tone too high for 16 kHz
+// to hold goes, rather than folding back as a false tone.
+func TestDownsampler(t *testing.T) {
+	rms := func(hz float64) float64 {
+		d := NewDownsampler(16000)
+		var out []float32
+		for c := range 10 {
+			chunk := make([]float32, Rate/10)
+			for i := range chunk {
+				chunk[i] = float32(0.5 * math.Sin(2*math.Pi*hz*float64(c*len(chunk)+i)/Rate))
+			}
+			out = append(out, d.Next(chunk)...)
+		}
+		if len(out) != 16000 {
+			t.Fatalf("%v Hz: %d samples a second, want 16000", hz, len(out))
+		}
+		var sum float64
+		for _, s := range out[1600:] {
+			sum += float64(s) * float64(s)
+		}
+		return math.Sqrt(sum / float64(len(out)-1600))
+	}
+	if r := rms(440); r < 0.33 || r > 0.38 {
+		t.Errorf("440 Hz came out at %.3f, want 0.354", r)
+	}
+	if r := rms(12000); r > 0.02 {
+		t.Errorf("12 kHz came out at %.3f, want it gone", r)
+	}
+}
