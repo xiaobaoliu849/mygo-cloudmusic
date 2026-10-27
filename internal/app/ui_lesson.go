@@ -63,11 +63,12 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 	if at < 0 {
 		at = max(0, sung)
 	}
-	// The line to keep in view: the one sung, singing through, else the
-	// one to start from.
+	// The line to keep in view: the one sung as the song plays on, sung
+	// through or under the take of it, else the one to start from; not
+	// the one before, which the song plays in over.
 	focus := at
-	if pl.SingingThrough() {
-		focus = max(0, sung)
+	if pl.SingingThrough() || a.playingThroughTake() {
+		focus = max(at, sung)
 	}
 
 	scroll := ui.Scroll(c.Key("lesson")).Grow(1).TrackScroll(&ls.scroll).Padding(4, 8, 24, 0)

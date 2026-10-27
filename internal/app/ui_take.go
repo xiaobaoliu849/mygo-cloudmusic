@@ -325,6 +325,13 @@ func (a *app) playTake(key int) {
 	t.out, t.key = audio.NewSound(mic.Rate, 1, mic.Normalize(tk.samples)).Play(), key
 }
 
+// playingThroughTake reports whether the take of the song sung through
+// plays back, the song on under it, line after line.
+func (a *app) playingThroughTake() bool {
+	t := &a.lesson.takes
+	return t.out != nil && t.key == throughTake && a.pl.PlayingUnder()
+}
+
 // stopTake stops a take playing back, and the song under it.
 func (a *app) stopTake() {
 	t := &a.lesson.takes

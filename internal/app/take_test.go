@@ -36,6 +36,13 @@ func (m *fakeMic) sing(d time.Duration) {
 // microphone fake.
 func takeApp(t *testing.T) (*app, *ui.Tester, *fakeMic) {
 	t.Helper()
+	return takeAppPosting(t, nil)
+}
+
+// takeAppPosting is takeApp, the player posting to post, if not nil, as
+// to the window, rather than dropping what it posts.
+func takeAppPosting(t *testing.T, post func(func())) (*app, *ui.Tester, *fakeMic) {
+	t.Helper()
 	m := &fakeMic{}
 	old := startMic
 	startMic = func(got func([]float32)) (interface{ Stop() }, error) {
@@ -44,6 +51,11 @@ func takeApp(t *testing.T) (*app, *ui.Tester, *fakeMic) {
 	}
 	t.Cleanup(func() { startMic = old })
 	a := newTestApp()
+	if post != nil {
+		a.pl = player.New(post)
+		a.pl.SetVolume(0.5)
+		a.hookLesson()
+	}
 	a.settings = defaultSettings()
 	a.pl.Cue([]netease.Track{{ID: 7, Name: "春日影", Duration: 200000}})
 	a.pl.SetLyrics([]lyrics.Line{
@@ -273,5 +285,53 @@ func TestTakeKeepsTempo(t *testing.T) {
 	}
 	if !a.pl.PlayingUnder() || a.pl.Tempo() != 1 {
 		t.Errorf("under the take %v, lesson tempo %v", a.pl.PlayingUnder(), a.pl.Tempo())
+	}
+}
+
+// Played back, the take of the song sung through keeps the line the
+// song under it is on in view, line after line; the pane used to stay
+// on the line it was sung from, the lit line scrolling away.
+func TestThroughTakeFollowsLines(t *testing.T) {
+	// The player's posts, run here as the window would: its pauses and
+	// seeks land through them.
+	posts := make(chan func(), 1024)
+	pump := func() {
+		for {
+			select {
+			case fn := <-posts:
+				fn()
+			default:
+				return
+			}
+		}
+	}
+	a, tt, m := takeAppPosting(t, func(fn func()) { posts <- fn })
+	a.pl.SetLyrics([]lyrics.Line{
+		{At: 200 * time.Millisecond, End: 600 * time.Millisecond, Text: "第一句"},
+		{At: 600 * time.Millisecond, End: time.Second, Text: "第二句"},
+		{At: time.Second, End: 1400 * time.Millisecond, Text: "第三句"},
+		{At: 1400 * time.Millisecond, End: 1800 * time.Millisecond, Text: "第四句"},
+	})
+	tt.Frame()
+	tt.Click("学法整首")
+	tt.Frame()
+	if err := tt.Click("第一句"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	m.sing(2 * time.Second)
+	tt.Click("停止")
+	tt.Frame()
+	if !a.playingThroughTake() {
+		t.Fatal("the take of the song sung through does not play back")
+	}
+	for deadline := time.Now().Add(3 * time.Second); a.lesson.at < 2; {
+		if time.Now().After(deadline) {
+			t.Fatalf("at %v in the song, the pane stays on line %d", a.pl.Position(), a.lesson.at+1)
+		}
+		time.Sleep(20 * time.Millisecond)
+		pump()
+		tt.Advance(20 * time.Millisecond)
+		tt.Frame()
 	}
 }
