@@ -34,6 +34,13 @@ type Player struct {
 	// second time, for the listener to sing along with it: 0 plays it
 	// once, then pauses.
 	Guide func() float64
+	// Records reports whether the listener records themselves singing a
+	// line along with it: it plays again then, at no volume if Guide is 0.
+	Records func() bool
+	// SingAlong, if set, hears a lesson's line start and stop playing for
+	// the listener to sing along with it, as to record them. Stopping, the
+	// player has paused already, unless the line plays on, looping.
+	SingAlong func(on bool)
 	// Cache keeps the songs played, if set.
 	Cache *Cache
 	// Changed, if set, hears that what plays, where it is or whether it

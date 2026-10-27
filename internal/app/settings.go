@@ -58,6 +58,9 @@ type settings struct {
 	// Tempo is how fast a lesson plays its lines, at the song's pitch: 1
 	// as the song goes, or slower.
 	Tempo float64 `json:"tempo"`
+	// AutoRecord records the listener as they sing a line along with it,
+	// to play them back once it ends.
+	AutoRecord bool `json:"autoRecord"`
 	// CacheMB is how many megabytes the songs kept on disk may take; 0
 	// keeps none.
 	CacheMB int `json:"cacheMB"`
@@ -68,7 +71,7 @@ type settings struct {
 }
 
 func defaultSettings() settings {
-	return settings{NotchActivity: true, Quality: "exhigh", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, Captions: true, Guide: guideSoft, Tempo: 1}
+	return settings{NotchActivity: true, Quality: "exhigh", Appearance: "system", Volume: 0.8, Normalize: true, AppIcon: "dock-and-menubar", CacheMB: 2048, Captions: true, Guide: guideSoft, Tempo: 1, AutoRecord: true}
 }
 
 func settingsPath() (string, error) {

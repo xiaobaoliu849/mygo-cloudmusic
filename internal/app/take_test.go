@@ -67,16 +67,16 @@ func takeApp(t *testing.T) (*app, *ui.Tester, *fakeMic) {
 	return a, tt, m
 }
 
-// Recording pauses the music; stopping keeps the take, of that line, and
-// plays it back.
+// Recording plays the line softly to sing along with; stopping pauses
+// it, keeps the take, of that line, and plays it back.
 func TestRecordTake(t *testing.T) {
 	a, tt, m := takeApp(t)
 	if err := tt.Click("录我唱的"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()
-	if a.pl.Playing() {
-		t.Error("the music plays on while recording")
+	if !a.pl.Playing() || !a.pl.SingingAlong() || a.lesson.takes.rec == nil {
+		t.Fatalf("playing %v, singing along %v, recording %v", a.pl.Playing(), a.pl.SingingAlong(), a.lesson.takes.rec != nil)
 	}
 	m.sing(1500 * time.Millisecond)
 	tt.Frame()
@@ -90,6 +90,9 @@ func TestRecordTake(t *testing.T) {
 	}
 	if got := len(tk.sung[1]); got != mic.Rate*3/2 {
 		t.Errorf("kept %d samples of line 1", got)
+	}
+	if a.pl.Playing() {
+		t.Error("the music plays over the take")
 	}
 	if tk.out == nil || tk.line != 1 {
 		t.Error("the take did not play back")
@@ -142,5 +145,25 @@ func TestMicFails(t *testing.T) {
 	}
 	if !tt.HasText("麦克风打不开：mic: no microphone") {
 		t.Error("did not say the microphone failed")
+	}
+}
+
+// With 跟唱时录音 on, the listener is recorded as the line plays again
+// to sing along with, unasked; off, not.
+func TestAutoRecord(t *testing.T) {
+	a, tt, _ := takeApp(t)
+	a.pl.SingLine(1) // as the line plays again, once heard
+	tt.Frame()
+	if a.lesson.takes.rec == nil {
+		t.Fatal("not recording as the listener sings along")
+	}
+	if err := tt.Click("跟唱时录音关"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	a.pl.SingLine(0)
+	tt.Frame()
+	if a.lesson.takes.rec != nil {
+		t.Error("recording with 跟唱时录音 off")
 	}
 }

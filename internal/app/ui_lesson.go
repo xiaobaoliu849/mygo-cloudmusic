@@ -107,10 +107,17 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 			}
 			ui.Text(c, status).FontSize(12.5).FontWeight(600).TextColor(white.Alpha(0.6))
 		})
-		ui.Row(c).Gap(20).Padding(0, 0, 0, 8).Children(func() {
+		ui.Column(c).Gap(2).Padding(4, 0, 0, 8).Children(func() {
 			a.choice(c, "跟唱时原唱", []choiceOption{{"不放", 0}, {"小声", guideSoft}, {"中等", guideMedium}}, a.settings.Guide, func(v float64) {
 				a.settings.Guide = v
 				a.pl.GuideChanged()
+			})
+			on := 0.0
+			if a.settings.AutoRecord {
+				on = 1
+			}
+			a.choice(c, "跟唱时录音", []choiceOption{{"开", 1}, {"关", 0}}, on, func(v float64) {
+				a.settings.AutoRecord = v == 1
 			})
 			a.choice(c, "速度", []choiceOption{{"原速", 1}, {"0.9×", player.TempoSlower}, {"0.75×", player.TempoSlow}}, pl.Tempo(), func(v float64) {
 				a.settings.Tempo = v
@@ -118,7 +125,7 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 			})
 		})
 		if chosen >= 0 {
-			a.takeBar(c, chosen, lines[chosen])
+			a.takeBar(c, chosen)
 		}
 	})
 
@@ -191,7 +198,7 @@ type choiceOption struct {
 // A click on another sets it, and keeps the settings.
 func (a *app) choice(c *ui.Context, title string, opts []choiceOption, cur float64, set func(float64)) {
 	ui.Row(c.Key(title)).Gap(4).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, title).FontSize(12.5).FontWeight(600).TextColor(white.Alpha(0.5)).Margin(0, 6, 0, 0)
+		ui.Text(c, title).Width(76).SingleLine().FontSize(12.5).FontWeight(600).TextColor(white.Alpha(0.5))
 		for _, o := range opts {
 			on := cur == o.v
 			b := ui.ButtonBase(c.Key(o.label)).Padding(4, 12).Radius(999).FocusRing(false).Label(title + o.label)

@@ -25,6 +25,7 @@ var startMic = func(got func([]float32)) (interface{ Stop() }, error) {
 // to hear how they sang: one take a line, the last.
 type takes struct {
 	sung map[int][]float32 // by line, mono at mic.Rate
+	want bool              // the listener asked to record the line sung along next
 	rec  *recording
 	out  *audio.Player // a take playing back
 	line int           // the line of the take playing back
@@ -51,15 +52,45 @@ func takeLimit(l lyrics.Line, tempo float64) time.Duration {
 	return min(max(d, 4*time.Second), 30*time.Second)
 }
 
+// hookLesson has the player ask the settings how a lesson goes, and tell
+// the app as a line plays for the listener to sing along with it: to
+// record them as they do, and play them back once it ends.
+func (a *app) hookLesson() {
+	a.pl.Guide = func() float64 { return a.settings.Guide }
+	a.pl.Records = func() bool { return a.settings.AutoRecord }
+	a.pl.SingAlong = func(on bool) {
+		t := &a.lesson.takes
+		if !on {
+			a.stopRecording()
+			return
+		}
+		want := t.want
+		t.want = false
+		n, _ := a.pl.Line()
+		lines, _ := a.pl.Lyrics()
+		if (want || a.settings.AutoRecord) && n >= 0 && n < len(lines) {
+			a.record(n, takeLimit(lines[n], a.pl.Tempo()))
+		}
+	}
+}
+
+// singTake plays line n softly for the listener to sing along with it,
+// recording them.
+func (a *app) singTake(n int) {
+	t := &a.lesson.takes
+	a.stopTake()
+	t.want = true
+	if !a.pl.SingLine(n) {
+		t.want = false
+	}
+}
+
 // record starts recording the listener singing line n, for at most limit,
-// with the music paused, and no take playing.
+// with no take playing: the music plays on, for them to sing along.
 func (a *app) record(n int, limit time.Duration) {
 	t := &a.lesson.takes
 	a.stopTake()
 	a.stopRecording()
-	if a.pl.Playing() {
-		a.pl.TogglePlay()
-	}
 	rec := &recording{line: n, limit: int(limit.Seconds() * mic.Rate)}
 	stop, err := startMic(func(s []float32) {
 		rec.mu.Lock()
@@ -91,7 +122,7 @@ func (a *app) record(n int, limit time.Duration) {
 }
 
 // stopRecording ends the take on its way, keeping it unless too short to
-// be singing, then plays it back.
+// be singing, then plays it back, unless the music plays on.
 func (a *app) stopRecording() {
 	t := &a.lesson.takes
 	rec := t.rec
@@ -114,7 +145,9 @@ func (a *app) stopRecording() {
 		t.sung = map[int][]float32{}
 	}
 	t.sung[rec.line] = samples
-	a.playTake(rec.line)
+	if !a.pl.Playing() {
+		a.playTake(rec.line)
+	}
 }
 
 // playTake plays back the take of line n, louder if sung quietly, with
@@ -151,7 +184,7 @@ func (a *app) forgetTakes() {
 
 // takeBar records the listener singing line n, and plays it back: a
 // meter shows the microphone hearing them as they sing.
-func (a *app) takeBar(c *ui.Context, n int, l lyrics.Line) {
+func (a *app) takeBar(c *ui.Context, n int) {
 	t := &a.lesson.takes
 	rec := t.rec
 	if rec != nil && rec.line != n {
@@ -173,7 +206,13 @@ func (a *app) takeBar(c *ui.Context, n int, l lyrics.Line) {
 			}
 			stop := pillButton(c.Key("stop-take"), nil, "停止录音", ui.Hex("#e5484d"), white).Label("停止录音")
 			if stop.Clicked() {
-				a.stopRecording()
+				// Pausing the line sung along stops the take, which plays
+				// back.
+				if a.pl.SingingAlong() {
+					a.pl.StopLine()
+				} else {
+					a.stopRecording()
+				}
 			}
 			// The meter: how loud the microphone hears the listener.
 			ui.Box(c).Width(120).Height(6).Radius(3).Background(white.Alpha(0.15)).Children(func() {
@@ -185,7 +224,7 @@ func (a *app) takeBar(c *ui.Context, n int, l lyrics.Line) {
 		}
 		start := pillButton(c.Key("record"), iconPodcast, "录我唱的", white.Alpha(0.14), white).Label("录我唱的")
 		if start.Clicked() {
-			a.record(n, takeLimit(l, a.pl.Tempo()))
+			a.singTake(n)
 		}
 		if samples, ok := t.sung[n]; ok {
 			playing := t.out != nil && t.line == n

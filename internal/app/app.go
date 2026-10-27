@@ -210,7 +210,7 @@ func Run() error {
 		a.pl = player.New(a.post)
 		a.pl.Quality = func() string { return a.settings.Quality }
 		a.pl.Normalize = func() bool { return a.settings.Normalize }
-		a.pl.Guide = func() float64 { return a.settings.Guide }
+		a.hookLesson()
 		if a.settings.Tempo > 0 {
 			a.pl.SetTempo(a.settings.Tempo)
 		}

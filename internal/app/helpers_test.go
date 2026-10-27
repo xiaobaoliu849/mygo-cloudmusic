@@ -15,5 +15,6 @@ func newTestApp() *app {
 	a.art = newArtCache(func(func()) {})
 	a.pl = player.New(func(func()) {})
 	a.pl.SetVolume(0.5)
+	a.hookLesson()
 	return a
 }

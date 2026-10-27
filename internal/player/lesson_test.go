@@ -176,3 +176,65 @@ func TestPlayLineSlower(t *testing.T) {
 		t.Errorf("played on at speed %v", s)
 	}
 }
+
+// Singing a line plays it softly straight away, telling SingAlong as it
+// starts, and as it stops, the music paused by then.
+func TestSingLineTellsSingAlong(t *testing.T) {
+	ch, p := posted()
+	defer p.out.Close()
+	p.SetLyrics(lessonLines)
+	p.Guide = func() float64 { return 0.25 }
+	var heard []bool
+	pausedAtStop := false
+	p.SingAlong = func(on bool) {
+		heard = append(heard, on)
+		if !on {
+			pausedAtStop = !p.Playing()
+		}
+	}
+	p.SingLine(1)
+	if !p.SingingAlong() || len(heard) != 1 || !heard[0] {
+		t.Fatalf("singing along %v, heard %v", p.SingingAlong(), heard)
+	}
+	until(t, ch, func() bool { return !p.Playing() })
+	if len(heard) != 2 || heard[1] || !pausedAtStop {
+		t.Errorf("heard %v, paused at the stop %v", heard, pausedAtStop)
+	}
+}
+
+// Recording with no guide, the line still plays again, silent, for as
+// long as the listener sings it.
+func TestRecordsWithoutGuide(t *testing.T) {
+	ch, p := posted()
+	defer p.out.Close()
+	p.SetLyrics(lessonLines)
+	p.Records = func() bool { return true }
+	var heard []bool
+	p.SingAlong = func(on bool) { heard = append(heard, on) }
+	p.PlayLine(1)
+	until(t, ch, p.SingingAlong)
+	p.fade.mu.Lock()
+	gain := p.fade.gain
+	p.fade.mu.Unlock()
+	if gain != 0 {
+		t.Errorf("sang along at %v, want silence", gain)
+	}
+	until(t, ch, func() bool { return !p.Playing() })
+	if len(heard) != 2 {
+		t.Errorf("heard %v", heard)
+	}
+}
+
+// Seeking away as the listener sings along stops the singing along.
+func TestSeekStopsSingingAlong(t *testing.T) {
+	_, p := posted()
+	defer p.out.Close()
+	p.SetLyrics(lessonLines)
+	var heard []bool
+	p.SingAlong = func(on bool) { heard = append(heard, on) }
+	p.SingLine(1)
+	p.Seek(30 * time.Second)
+	if p.SingingAlong() || len(heard) != 2 || heard[1] {
+		t.Errorf("singing along %v, heard %v", p.SingingAlong(), heard)
+	}
+}
