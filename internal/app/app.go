@@ -101,13 +101,14 @@ type app struct {
 	nowPlaying  bool
 	npOpen      bool      // Now Playing as it last showed: open or not
 	npChangedAt time.Time // when it last opened or closed
-	npPane      int       // paneLyrics, paneQueue, paneStage, paneComments, paneProgram or paneCaptions
+	npPane      int       // paneLyrics, paneQueue, paneStage, paneComments, paneProgram, paneCaptions or paneLesson
 	npPaneTop   float32   // how far the cover beside the pane starts below its top
 	lyricScroll ui.ScrollState
 	lyricGlide  lyricGlide
 	lyricAt     int
 	lyricTrack  int64
 	queueList   ui.ListState
+	lesson      lessonState
 	queueAt     int // the row of the queue pane last scrolled to, -1 while it is hidden
 	comments    commentState
 	tabCount    rollState // the count on the comments' tab, as it rolls

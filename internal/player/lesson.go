@@ -1,0 +1,140 @@
+package player
+
+import (
+	"time"
+
+	"netease-music-mygo/internal/lyrics"
+)
+
+// A lesson plays a song's lyrics a line at a time, for the listener to
+// sing each one after it: a line plays from a little before it starts,
+// then pauses at its end, or plays again as many times as asked.
+type lesson struct {
+	line  int  // the line chosen, -1 for none
+	alone bool // the line plays alone: it pauses or loops at its end
+	left  int  // how many more times it plays after this one; -1 forever
+	watch int  // counts the waits for the line's end, to drop stale ones
+}
+
+// lineLead is how long before a line it starts playing: enough for the
+// music to fade in, and for the listener to hear where the line comes in.
+const lineLead = 400 * time.Millisecond
+
+// lineTail lets a line's last word ring out before it pauses.
+const lineTail = 150 * time.Millisecond
+
+// Line returns the line of the lyrics the lesson is on, -1 for none, and
+// whether it plays alone, to pause or loop at its end.
+func (p *Player) Line() (int, bool) { return p.lesson.line, p.lesson.alone }
+
+// PlayLine plays line n of the lyrics alone, then pauses at its end. It
+// reports false, doing nothing, while the track or its lyrics load, or
+// with no line n.
+func (p *Player) PlayLine(n int) bool { return p.LoopLine(n, 1) }
+
+// LoopLine plays line n of the lyrics times times over, then pauses at
+// its end; with times 0 or less, until something else plays. It reports
+// false, doing nothing, while the track or its lyrics load, or with no
+// line n.
+func (p *Player) LoopLine(n, times int) bool {
+	if p.out == nil || n < 0 || n >= len(p.lyrics) {
+		return false
+	}
+	left := times - 1
+	if times <= 0 {
+		left = -1
+	}
+	p.lesson = lesson{line: n, alone: true, left: left, watch: p.lesson.watch + 1}
+	p.fromLine()
+	return true
+}
+
+// NextLine plays the line after the lesson's, or after the one sung now.
+func (p *Player) NextLine() bool { return p.PlayLine(p.lessonLine() + 1) }
+
+// PrevLine plays the line before the lesson's, or before the one sung
+// now.
+func (p *Player) PrevLine() bool { return p.PlayLine(max(0, p.lessonLine()-1)) }
+
+// lessonLine is the lesson's line, else the one sung at the position.
+func (p *Player) lessonLine() int {
+	if p.lesson.line >= 0 {
+		return p.lesson.line
+	}
+	return lyrics.Index(p.lyrics, p.Position())
+}
+
+// EndLesson lets the song play on through its lines, as it would without
+// a lesson.
+func (p *Player) EndLesson() {
+	p.lesson = lesson{line: -1, watch: p.lesson.watch + 1}
+}
+
+// span returns where the lesson's line plays from and pauses.
+func (p *Player) span() (from, to time.Duration) {
+	l := p.lyrics[p.lesson.line]
+	return max(0, l.At-lineLead), l.End + lineTail
+}
+
+// fromLine plays the lesson's line from its start, and waits for its end.
+func (p *Player) fromLine() {
+	from, _ := p.span()
+	p.seek(from)
+	switch {
+	case !p.playing:
+		p.TogglePlay()
+	case !p.seeking && !p.out.Playing():
+		// At the track's end: the seek landed at once, paused.
+		p.out.Play()
+	}
+	p.watchLine()
+}
+
+// watchLine waits for the end of the line playing alone, checking it
+// then: the position is where the listener hears, which seeks and fades
+// move off the clock.
+func (p *Player) watchLine() {
+	if !p.lesson.alone || !p.playing {
+		return
+	}
+	p.lesson.watch++
+	watch := p.lesson.watch
+	_, to := p.span()
+	wait := max(to-p.Position(), 20*time.Millisecond)
+	time.AfterFunc(wait, func() {
+		p.post(func() {
+			if watch == p.lesson.watch {
+				p.checkLine()
+			}
+		})
+	})
+}
+
+// checkLine pauses or loops the line once its end has played, and else
+// waits on.
+func (p *Player) checkLine() {
+	if !p.lesson.alone || !p.playing || p.out == nil {
+		return
+	}
+	if _, to := p.span(); p.Position() < to {
+		p.watchLine()
+		return
+	}
+	p.lineEnded()
+}
+
+// lineEnded plays the lesson's line again, if it has times left, or
+// pauses, the lesson staying on it.
+func (p *Player) lineEnded() {
+	if p.lesson.left != 0 {
+		if p.lesson.left > 0 {
+			p.lesson.left--
+		}
+		p.fromLine()
+		return
+	}
+	p.lesson.alone = false
+	if p.playing {
+		p.TogglePlay()
+	}
+}

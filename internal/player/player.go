@@ -64,6 +64,7 @@ type Player struct {
 
 	lyrics       []lyrics.Line
 	lyricsLoaded bool
+	lesson       lesson
 
 	// pending holds a seek asked for while the track loads.
 	pending time.Duration
@@ -75,7 +76,7 @@ type Player struct {
 }
 
 func New(post func(func())) *Player {
-	p := &Player{post: post, at: -1, volume: 0.8, gain: 1}
+	p := &Player{post: post, at: -1, volume: 0.8, gain: 1, lesson: lesson{line: -1}}
 	// Music, mixed far enough ahead to play on while macOS keeps the app
 	// waiting, as it does while its appearance changes.
 	audio.SetLatency(audio.LatencyPlayback)
@@ -133,6 +134,10 @@ func (p *Player) announce(t *netease.Track, artwork []byte) {
 }
 
 func (p *Player) ended() {
+	if p.lesson.alone {
+		p.lineEnded()
+		return
+	}
 	if p.repeat == RepeatOne {
 		p.out.Seek(0)
 		p.out.Play()
@@ -454,6 +459,7 @@ func (p *Player) TogglePlay() {
 		out.Play()
 	}
 	p.fade.fade(1, fadeIn, nil)
+	p.watchLine()
 	p.sync()
 }
 
@@ -464,8 +470,14 @@ const seekGap = 30 * time.Millisecond
 
 // Seek moves to t. Playing, it pauses and plays again around the jump,
 // which the audio player fades over a few milliseconds, rather than
-// cutting from one sound to the other with a click.
+// cutting from one sound to the other with a click. It ends a lesson:
+// the listener went elsewhere in the song.
 func (p *Player) Seek(t time.Duration) {
+	p.EndLesson()
+	p.seek(t)
+}
+
+func (p *Player) seek(t time.Duration) {
 	if p.out == nil {
 		p.pending = t
 		return
@@ -586,6 +598,7 @@ func (p *Player) loadSkipping(at, skipped int, play bool, from time.Duration) {
 	p.loading, p.playing, p.err = true, play, ""
 	p.awaiting = false
 	p.lyrics, p.lyricsLoaded = nil, false
+	p.EndLesson()
 	p.pending = from
 	p.announce(&t, nil)
 	p.refill()

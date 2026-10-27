@@ -106,7 +106,7 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 	// An episode has what it is about and its captions in place of lyrics;
 	// a song, lyrics in place of those.
 	switch program := tr.ProgramID != 0; {
-	case program && (a.npPane == paneLyrics || a.npPane == paneStage):
+	case program && (a.npPane == paneLyrics || a.npPane == paneStage || a.npPane == paneLesson):
 		a.npPane = paneProgram
 		if a.captionsOn() {
 			a.npPane = paneCaptions
@@ -206,6 +206,8 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 					a.programPane(c, tr)
 				case paneCaptions:
 					a.captionsPane(c, tr, h)
+				case paneLesson:
+					a.lessonPane(c, tr)
 				default:
 					a.queuePane(c)
 				}
@@ -242,6 +244,7 @@ const (
 	paneComments
 	paneProgram
 	paneCaptions
+	paneLesson
 )
 
 func (a *app) paneTabs(c *ui.Context) {
@@ -256,6 +259,7 @@ func (a *app) paneTabs(c *ui.Context) {
 	}
 	a.paneTab(c, paneLyrics, "歌词")
 	a.paneTab(c, paneStage, "律动")
+	a.paneTab(c, paneLesson, "跟唱")
 	a.paneTab(c, paneQueue, "待播清单")
 	a.paneTab(c, paneComments, a.commentsTab())
 }

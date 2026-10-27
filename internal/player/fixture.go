@@ -21,6 +21,7 @@ func (p *Player) Cue(tracks []netease.Track) {
 	}
 	p.at = 0
 	p.track = &p.queue[0]
+	p.EndLesson()
 }
 
 // SetLyrics gives the current track lines, as loaded.
