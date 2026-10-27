@@ -18,6 +18,7 @@ type lessonState struct {
 	scroll ui.ScrollState
 	track  int64 // the track the pane last showed
 	at     int   // the line it last scrolled to
+	takes  takes
 }
 
 // lessonPane lists the lines of the song, numbered: a click on one plays
@@ -39,6 +40,7 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 	}
 	if ls.track != tr.ID {
 		ls.track, ls.at, ls.scroll = tr.ID, -2, ui.ScrollState{}
+		a.forgetTakes()
 	}
 	chosen, alone := pl.Line()
 	pos := pl.Position()
@@ -48,6 +50,8 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 		c.After(lines[sung+1].At - pos + 20*time.Millisecond)
 	}
 	play := func(n int) {
+		a.stopRecording()
+		a.stopTake()
 		if ls.loop {
 			pl.LoopLine(n, 0)
 		} else {
@@ -90,6 +94,10 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 			ui.Spacer(c)
 			status := "点一句歌词，听完跟着唱"
 			switch {
+			case chosen >= 0 && ls.takes.rec != nil:
+				status = fmt.Sprintf("第 %d / %d 句 · 录音中，唱吧", chosen+1, len(lines))
+			case chosen >= 0 && ls.takes.out != nil:
+				status = fmt.Sprintf("第 %d / %d 句 · 在放你唱的", chosen+1, len(lines))
 			case pl.SingingAlong():
 				status = fmt.Sprintf("第 %d / %d 句 · 跟着原唱唱", chosen+1, len(lines))
 			case chosen >= 0 && alone:
@@ -109,6 +117,9 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 				pl.SetTempo(v)
 			})
 		})
+		if chosen >= 0 {
+			a.takeBar(c, chosen, lines[chosen])
+		}
 	})
 
 	scroll := ui.Scroll(c.Key("lesson")).Grow(1).TrackScroll(&ls.scroll).Padding(0, 8, 120, 0)
