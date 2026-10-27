@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,80 @@ var startMic = func(got func([]float32)) (interface{ Stop() }, error) {
 		return nil, err
 	}
 	return r, nil
+}
+
+// A micShare is the microphone, recorded once, shared among those that
+// listen to it: the teacher, all along, and a take, as it records. Each
+// recording the microphone of its own, a take recorded with the teacher
+// on came out silent, and the teacher went deaf after it.
+type micShare struct {
+	mu   sync.Mutex
+	rec  interface{ Stop() }
+	subs map[int]func([]float32)
+	next int
+}
+
+// microphone is the microphone the teacher and a take share, made the
+// first time it is asked for.
+func (a *app) microphone() *micShare {
+	if a.sharedMic == nil {
+		a.sharedMic = &micShare{}
+	}
+	return a.sharedMic
+}
+
+// listen gives got what the microphone hears, recording it if nothing
+// else listens yet, until the listener it returns stops: the microphone
+// with it, if nothing else listens.
+func (m *micShare) listen(got func([]float32)) (interface{ Stop() }, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rec == nil {
+		rec, err := startMic(m.hear)
+		if err != nil {
+			return nil, err
+		}
+		m.rec, m.subs = rec, map[int]func([]float32){}
+	}
+	m.next++
+	m.subs[m.next] = got
+	return &micListener{m, m.next}, nil
+}
+
+// hear gives each listener what the microphone heard.
+func (m *micShare) hear(samples []float32) {
+	m.mu.Lock()
+	subs := make([]func([]float32), 0, len(m.subs))
+	for _, got := range m.subs {
+		subs = append(subs, got)
+	}
+	m.mu.Unlock()
+	for _, got := range subs {
+		got(samples)
+	}
+}
+
+// A micListener is one listening to a micShare.
+type micListener struct {
+	m  *micShare
+	id int
+}
+
+// Stop stops listening, and the microphone if nothing else listens.
+func (l *micListener) Stop() {
+	m := l.m
+	m.mu.Lock()
+	delete(m.subs, l.id)
+	var rec interface{ Stop() }
+	if len(m.subs) == 0 {
+		rec, m.rec = m.rec, nil
+	}
+	m.mu.Unlock()
+	// Not holding mu: stopping, the microphone hands over the last it
+	// heard, to hear, which takes it.
+	if rec != nil {
+		rec.Stop()
+	}
 }
 
 // throughTake is the key of the take of the song sung through, among
@@ -147,7 +222,7 @@ func (a *app) record(key int, limit, from time.Duration) {
 	sync := time.Duration(a.settings.Sync * float64(time.Second))
 	tempo := a.pl.Tempo()
 	rec := &recording{key: key, limit: int(limit.Seconds() * mic.Rate), take: &take{at: max(0, from+sync), tempo: tempo}}
-	stop, err := startMic(func(s []float32) {
+	stop, err := a.microphone().listen(func(s []float32) {
 		arrived := time.Now()
 		rec.mu.Lock()
 		if rec.full {
@@ -208,7 +283,17 @@ func (a *app) stopRecording() {
 		return
 	}
 	if mic.Level(samples) == 0 {
-		t.err = "没录到声音：看看系统的声音设置里，默认的麦克风是否正确、没有静音"
+		// How long it went and how loud it got, to tell a microphone that
+		// gave nothing from one that heard a quiet voice.
+		var peak float64
+		for _, s := range samples {
+			peak = max(peak, math.Abs(float64(s)))
+		}
+		loudest := "完全无声"
+		if peak > 0 {
+			loudest = fmt.Sprintf("最响 %.0f dB", 20*math.Log10(peak))
+		}
+		t.err = fmt.Sprintf("没录到声音（%.1f 秒，%s）：看看系统的声音设置里，默认的麦克风是否正确、没有静音", float64(len(samples))/mic.Rate, loudest)
 	}
 	if t.sung == nil {
 		t.sung = map[int]*take{}

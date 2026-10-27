@@ -44,8 +44,13 @@ func (v *Voice) Hush() {
 func (v *Voice) Speaking(heard time.Duration) bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return len(v.queued) > 0 || heard < time.Duration(v.said)*time.Second/OutRate
+	return len(v.queued) > 0 || heard+heardSlack < time.Duration(v.said)*time.Second/OutRate
 }
+
+// heardSlack is how far short of the end of what was said the audio
+// player's position may stop, all of it heard: it reads a few frames
+// ahead of where it plays, to smooth them, and its position stops there.
+const heardSlack = 20 * time.Millisecond
 
 // Close ends the Voice: the player playing it comes to its end.
 func (v *Voice) Close() {

@@ -2,7 +2,9 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -58,9 +60,6 @@ var teacherKey = func() string {
 // saveTeacherKey keeps the key the listener pasted; tests swap it.
 var saveTeacherKey = func(key string) error { return mygo.Secrets.Set(teacherSecret, []byte(key)) }
 
-// teacherMic records for the teacher to hear; tests swap it.
-var teacherMic = func(got func([]float32)) (interface{ Stop() }, error) { return startMic(got) }
-
 // teacherState is the AI teacher: a voice model the listener talks with,
 // which runs the lesson through the tools the app gives it, playing a
 // line, then hearing the listener sing it, and saying how it went.
@@ -79,6 +78,13 @@ type teacherState struct {
 	// hushed drops what is left of a response the listener cut short, by
 	// taking over, until the next.
 	hushed bool
+	// reply is what the teacher says in the response on its way, and
+	// replyCalls how many tools it calls in it.
+	reply      string
+	replyCalls int
+	// reminded says the teacher was reminded to call what it said it
+	// would play, once, until it calls something or the listener speaks.
+	reminded bool
 
 	// calls are the response's calls of tools: run in turn once it is
 	// done and heard, each once what the one before started has ended.
@@ -89,6 +95,9 @@ type teacherState struct {
 	out   *audio.Player // plays voice
 	mic   interface{ Stop() }
 	open  *atomic.Bool // the microphone goes to the teacher
+	// level is how loud the teacher hears the listener, as mic.Level, in
+	// the bits of a float32: 0 while it does not hear.
+	level *atomic.Uint32
 	quit  chan struct{}
 }
 
@@ -168,7 +177,8 @@ func (a *app) pasteTeacherKey() {
 func (a *app) connectTeacher(key string) {
 	t := &a.teacher
 	a.stopTeacher()
-	t.on, t.err = true, ""
+	// A new conversation: the teacher remembers none of the last.
+	t.on, t.err, t.said = true, "", nil
 	gen := t.gen
 	t.song = a.lyricsTrack()
 	cfg := teacher.Config{Key: key, Instructions: a.teacherInstructions(), Tools: teacherTools}
@@ -203,13 +213,16 @@ func (a *app) teacherDialed(gen int, s teacherSession, err error) {
 	t.voice = teacher.NewVoice()
 	t.out = audio.NewPlayer(t.voice)
 	t.out.Play()
-	open := &atomic.Bool{}
-	t.open = open
+	open, level := &atomic.Bool{}, &atomic.Uint32{}
+	t.open, t.level = open, level
 	down := mic.NewDownsampler(teacher.InRate)
-	m, err := teacherMic(func(samples []float32) {
-		if open.Load() {
-			s.Hear(down.Next(samples))
+	m, err := a.microphone().listen(func(samples []float32) {
+		if !open.Load() {
+			level.Store(0)
+			return
 		}
+		level.Store(math.Float32bits(mic.Level(samples)))
+		s.Hear(down.Next(samples))
 	})
 	if err != nil {
 		t.err = "麦克风打不开：" + err.Error()
@@ -292,12 +305,14 @@ func (a *app) teacherEvent(e teacher.Event) {
 				t.said = append(t.said, u)
 			}
 		}
+		t.reminded = false
 		// The listener stopped singing: the take of it ends.
 		if a.lesson.takes.rec != nil {
 			a.stopRecording()
 		}
 	case teacher.Answering:
 		t.answering, t.hushed, t.err = true, false, ""
+		t.reply, t.replyCalls = "", 0
 	case teacher.Saying:
 		if t.hushed {
 			break
@@ -307,6 +322,7 @@ func (a *app) teacherEvent(e teacher.Event) {
 			t.saying = true
 		}
 		t.said[len(t.said)-1].text += e.Text
+		t.reply += e.Text
 	case teacher.Speech:
 		if t.voice != nil && !t.hushed {
 			t.voice.Say(e.Audio)
@@ -317,8 +333,19 @@ func (a *app) teacherEvent(e teacher.Event) {
 			c.ran, c.skipped, c.result = true, true, skippedCall()
 		}
 		t.calls = append(t.calls, c)
+		t.replyCalls++
 	case teacher.Answered:
 		t.answering, t.saying = false, false
+		if t.replyCalls > 0 {
+			t.reminded = false
+		} else if !t.hushed && !t.reminded && t.sess != nil && promisesToPlay(t.reply) {
+			// It said it would play something, and called nothing, as it
+			// sometimes does: reminded, once, it calls it.
+			t.reminded = true
+			t.sess.Tell(playReminder)
+			t.sess.Respond()
+			t.answering = true
+		}
 	case teacher.Failed:
 		t.err = e.Err.Error()
 	case teacher.Closed:
@@ -331,6 +358,22 @@ func (a *app) teacherEvent(e teacher.Event) {
 		t.said = t.said[len(t.said)-60:]
 	}
 }
+
+// promisesToPlay reports whether what the teacher said says it plays
+// something now, as "我再放一遍第二句给你听": not asks whether to, as
+// "要不要我再放一遍？".
+func promisesToPlay(said string) bool {
+	said = strings.TrimSpace(said)
+	if strings.HasSuffix(said, "？") || strings.HasSuffix(said, "?") {
+		return false
+	}
+	return playPromise.MatchString(said)
+}
+
+var playPromise = regexp.MustCompile("再放|放一遍|放给你|放第|播放|听一遍|再听|来听|先听|听一下|示范")
+
+// playReminder reminds the teacher to call what it said it would play.
+const playReminder = "（系统提醒，不是学生说的：你刚才说要放给学生听，但没有调用工具。现在就调用相应的工具（play_line、loop_line 或 play_recording），不要再重复说话。）"
 
 // teacherSpeaking reports whether the teacher's voice plays.
 func (a *app) teacherSpeaking() bool {
@@ -403,6 +446,8 @@ func toolError(why string) map[string]any { return map[string]any{"error": why} 
 // runTool does what the teacher called c for, returning what it came to
 // and, for what plays, whether it plays on.
 func (a *app) runTool(c teacher.Call) (any, func() bool) {
+	// What went wrong with a take before is told no more.
+	a.lesson.takes.err = ""
 	lines, _ := a.pl.Lyrics()
 	if len(lines) == 0 && c.Name != "play_song" && c.Name != "pause" && c.Name != "slow_down" {
 		return toolError("现在没有歌词：请学生先放一首有歌词的歌"), nil
@@ -598,7 +643,7 @@ func (a *app) teacherInstructions() string {
 }
 
 // teacherPrompt is how the teacher teaches.
-const teacherPrompt = `你是一位耐心、温暖的声乐老师，在一个音乐播放器里教学生唱歌，一次教一句。用中文和学生说话，每次只说一两句，简短自然。你自己不唱：原曲就是示范，用工具放给学生听。
+const teacherPrompt = `你是一位耐心、温暖的声乐老师，在一个音乐播放器里教学生唱歌，一次教一句。始终用简体中文和学生说话，不管学生说的、唱的是日语、英语还是别的语言（歌词本身照原文念）；每次只说一两句，简短自然。你自己不唱：原曲就是示范，用工具放给学生听。
 
 一句的教法：
 1. 用 play_line 把这一句放给学生听。它播完才返回，返回前不要说话。
@@ -606,7 +651,10 @@ const teacherPrompt = `你是一位耐心、温暖的声乐老师，在一个音
 3. 学生唱完后，对照这一句的歌词，指出一两个具体的问题：哪个音发得不准、太短或太长、在哪换气、节奏快了还是慢了；给一个口型、舌位或气息的小建议，再鼓励一下。
 4. 问学生是再来一遍，还是学下一句。再来用 play_line 或 loop_line，下一句先 next_line 再 play_line。
 
-学生也可以随时提要求：放慢（slow_down）、听整首（play_song）、听自己唱的（play_recording）。歌词的行号从 1 开始，和学生屏幕上的编号一样。日语歌词可以用假名或罗马音帮学生读准。歌在放的时候你听不到学生说话。`
+学生也可以随时提要求：放慢（slow_down）、听整首（play_song）、听自己唱的（play_recording）。歌词的行号从 1 开始，和学生屏幕上的编号一样。日语歌词可以用假名或罗马音帮学生读准。歌在放的时候你听不到学生说话。
+
+说要放、要录，就在同一次回复里调用 play_line、loop_line 或 start_recording，不要只说不做。
+你不会唱歌，不要试着唱：要听唱法，就用 play_line 放原曲，难的句子先用 slow_down 放慢到 0.75。学生要你示范发音时，用日语一个音一个音、慢慢地念，每个音之间停一下，比如「お、も、い、つ、づ、け、て」。`
 
 // teacherTools are the tools the teacher runs the lesson with.
 var teacherTools = []teacher.Tool{

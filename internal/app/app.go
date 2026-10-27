@@ -110,7 +110,8 @@ type app struct {
 	queueList   ui.ListState
 	lesson      lessonState
 	teacher     teacherState
-	queueAt     int // the row of the queue pane last scrolled to, -1 while it is hidden
+	sharedMic   *micShare // the microphone the teacher and a take share: see microphone
+	queueAt     int       // the row of the queue pane last scrolled to, -1 while it is hidden
 	comments    commentState
 	tabCount    rollState // the count on the comments' tab, as it rolls
 

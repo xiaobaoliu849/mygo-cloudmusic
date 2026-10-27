@@ -8,6 +8,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"netease-music-mygo/internal/lyrics"
+	"netease-music-mygo/internal/mic"
 	"netease-music-mygo/internal/teacher"
 )
 
@@ -39,24 +40,20 @@ func (f *fakeTeacher) Answer(id string, r any) error {
 }
 
 // teacherApp is takeApp with the teacher on and connected, the model
-// fake, and what the microphone gives the teacher in hear.
+// fake, and hear giving the microphone, the fake one, samples.
 func teacherApp(t *testing.T) (*app, *ui.Tester, *fakeMic, *fakeTeacher, func([]float32)) {
 	t.Helper()
 	a, tt, m := takeApp(t)
 	f := &fakeTeacher{answers: map[string]any{}}
-	var hear func([]float32)
-	oldKey, oldDial, oldMic := teacherKey, dialTeacher, teacherMic
+	hear := func(s []float32) { m.got(s) }
+	oldKey, oldDial := teacherKey, dialTeacher
 	teacherKey = func() string { return "test-key" }
 	dialed := make(chan teacher.Config, 1)
 	dialTeacher = func(cfg teacher.Config, got func(teacher.Event)) (teacherSession, error) {
 		dialed <- cfg
 		return f, nil
 	}
-	teacherMic = func(got func([]float32)) (interface{ Stop() }, error) {
-		hear = got
-		return &fakeMic{}, nil
-	}
-	t.Cleanup(func() { teacherKey, dialTeacher, teacherMic = oldKey, oldDial, oldMic })
+	t.Cleanup(func() { teacherKey, dialTeacher = oldKey, oldDial })
 	t.Cleanup(a.stopTeacher)
 	if err := tt.Click("AI 老师"); err != nil {
 		t.Fatal(err)
@@ -134,6 +131,21 @@ func TestTeacherToggle(t *testing.T) {
 	if a.teacher.on || !f.closed {
 		t.Errorf("turned off: on %v, hung up %v", a.teacher.on, f.closed)
 	}
+
+	// Turned on again, it starts a new conversation, showing none of the
+	// last: it greeted twice, the first greeting kept.
+	a.teacher.said = []utterance{{teacher: true, text: "你好"}}
+	teacherKey = func() string { return saved }
+	tt.Click("AI 老师")
+	tt.Frame()
+	select {
+	case <-dialed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not connect again")
+	}
+	if len(a.teacher.said) != 0 {
+		t.Errorf("turned on again, showing %v", a.teacher.said)
+	}
 }
 
 // A line the teacher plays plays once, with no pass to sing along, and
@@ -142,9 +154,16 @@ func TestTeacherToggle(t *testing.T) {
 func TestTeacherPlaysLine(t *testing.T) {
 	a, _, _, f, hear := teacherApp(t)
 	a.teacherTick()
-	hear(make([]float32, 4800))
+	voice := make([]float32, 4800)
+	for i := range voice {
+		voice[i] = 0.3
+	}
+	hear(voice)
 	if f.heard != 1600 {
 		t.Fatalf("heard %d samples of 100 ms, want 1600 at 16 kHz", f.heard)
+	}
+	if a.teacher.level.Load() == 0 {
+		t.Error("the meter shows nothing heard")
 	}
 
 	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
@@ -155,9 +174,9 @@ func TestTeacherPlaysLine(t *testing.T) {
 	if n, alone := a.pl.Line(); n != 0 || !alone || !a.pl.Playing() {
 		t.Fatalf("line %d, alone %v, playing %v", n, alone, a.pl.Playing())
 	}
-	hear(make([]float32, 4800))
-	if len(f.answers) != 0 || f.heard != 1600 {
-		t.Errorf("as the line plays: answered %v, heard %d", f.answers, f.heard)
+	hear(voice)
+	if len(f.answers) != 0 || f.heard != 1600 || a.teacher.level.Load() != 0 {
+		t.Errorf("as the line plays: answered %v, heard %d, meter %v", f.answers, f.heard, a.teacher.level.Load())
 	}
 
 	// The line plays to its end, and pauses.
@@ -195,6 +214,15 @@ func TestTeacherCallsWaitForItsVoice(t *testing.T) {
 	a.teacherTick()
 	if a.pl.Playing() || len(f.answers) != 0 {
 		t.Errorf("played the line over the teacher's voice: playing %v, answered %v", a.pl.Playing(), f.answers)
+	}
+	// Its voice heard, the line plays. It used to wait on forever, the
+	// voice's player stopping a few frames short of the end of it.
+	for deadline := time.Now().Add(3 * time.Second); !a.pl.Playing(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("the line did not play once the teacher's voice ended: speaking %v", a.teacherSpeaking())
+		}
+		time.Sleep(50 * time.Millisecond)
+		a.teacherTick()
 	}
 }
 
@@ -335,5 +363,94 @@ func TestLessonNumbersSungLines(t *testing.T) {
 	}
 	if _, ok := teacherLine(lines, map[string]any{"n": 3.0}, 0); ok {
 		t.Error("the teacher has a line 3 of 2")
+	}
+}
+
+// The teacher and a take share the microphone, opened once: a take the
+// teacher asks for hears the listener as the teacher does, and once it
+// ends, the teacher hears on. Each opened the microphone of its own, and
+// a take came out silent, the teacher deaf after it.
+func TestTeacherSharesMic(t *testing.T) {
+	a, _, m, f, _ := teacherApp(t)
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "r", Name: "start_recording"}})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	if a.lesson.takes.rec == nil || m.opens != 1 {
+		t.Fatalf("recording %v, the microphone opened %d times", a.lesson.takes.rec != nil, m.opens)
+	}
+	m.sing(time.Second)
+	if f.heard != 16000 {
+		t.Errorf("the teacher heard %d samples of a second", f.heard)
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Heard, Text: "世界で僕は独りぼっちだった"})
+	tk := a.lesson.takes.sung[1]
+	if tk == nil || len(tk.samples) != 48000 || mic.Level(tk.samples) == 0 {
+		t.Fatalf("the take came out %v", tk)
+	}
+	if m.stopped {
+		t.Fatal("the take, ending, stopped the microphone the teacher hears")
+	}
+	m.sing(100 * time.Millisecond)
+	if f.heard != 17600 {
+		t.Errorf("after the take, the teacher heard %d, want 17600", f.heard)
+	}
+	a.stopTeacher()
+	if !m.stopped {
+		t.Error("the microphone records on, nothing listening")
+	}
+}
+
+// The teacher saying it plays a line, and calling nothing, as it did
+// ("好，那我再放一遍第二句给你听", and nothing played), is reminded once,
+// unseen, to call it; asking whether to play is no promise, and once
+// reminded, it is not again until it calls something or the listener
+// speaks.
+func TestTeacherRemindedToPlay(t *testing.T) {
+	a, _, _, f, _ := teacherApp(t)
+	reply := func(text string, calls ...string) {
+		a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+		a.teacherEvent(teacher.Event{Kind: teacher.Saying, Text: text})
+		for _, name := range calls {
+			a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: name, Name: name}})
+		}
+		a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	}
+	told := len(f.told)
+	reply("要不要我再放一遍？")
+	if len(f.told) != told {
+		t.Errorf("reminded, asking: %q", f.told[told:])
+	}
+	reply("好，那我再放一遍第二句给你听。")
+	if len(f.told) != told+1 || !strings.Contains(f.told[told], "play_line") || f.responded != 1 {
+		t.Fatalf("not reminded to play: told %q, responded %d", f.told[told:], f.responded)
+	}
+	if said := a.teacher.said[len(a.teacher.said)-1].text; strings.Contains(said, "提醒") {
+		t.Error("the reminder shows as said")
+	}
+	reply("好，我放给你听。")
+	if len(f.told) != told+1 {
+		t.Error("reminded twice running")
+	}
+	reply("我们先听第二句。", "play_line")
+	reply("好，再放一遍。")
+	if len(f.told) != told+2 {
+		t.Error("not reminded again, once it had called a tool")
+	}
+}
+
+// What went wrong with a take is told until the listener starts on
+// something else: it stayed, a take of long before seeming to go wrong
+// on every line.
+func TestTakeErrorClears(t *testing.T) {
+	a, tt, _ := takeApp(t)
+	a.lesson.takes.err = "没录到声音（5.0 秒，完全无声）"
+	if err := tt.Click("悴んだ心ふるえる眼差し"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.lesson.takes.err != "" {
+		t.Errorf("still telling %q", a.lesson.takes.err)
 	}
 }

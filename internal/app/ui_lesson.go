@@ -168,6 +168,8 @@ func numberedLine(lines []lyrics.Line, num int) (int, bool) {
 func (a *app) startLesson(n int, again bool) {
 	ls := &a.lesson
 	ls.pointed = 0
+	// What went wrong with a take before is told no more.
+	ls.takes.err = ""
 	a.teacherYield()
 	a.stopRecording()
 	a.stopTake()

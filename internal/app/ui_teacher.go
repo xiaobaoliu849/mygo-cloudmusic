@@ -1,6 +1,7 @@
 package app
 
 import (
+	"math"
 	"strings"
 	"time"
 
@@ -24,11 +25,7 @@ func (a *app) teacherButton(c *ui.Context) {
 	}
 	b.Background(b.AnimateColor("bg", bg, ui.Animation{Duration: 150 * time.Millisecond}))
 	b.Children(func() {
-		dot := white.Alpha(0.35)
-		if t.on {
-			dot = teacherGreen
-		}
-		ui.Box(c).Size(7, 7).Radius(3.5).Background(dot)
+		ui.Box(c).Size(7, 7).Radius(3.5).Background(a.teacherDot())
 		ui.Text(c, "AI 老师").FontSize(12.5).FontWeight(600).TextColor(white).SingleLine()
 	})
 	if b.Clicked() {
@@ -38,6 +35,19 @@ func (a *app) teacherButton(c *ui.Context) {
 			a.startTeacher()
 		}
 	}
+}
+
+// teacherDot is the color of the dot saying how the teacher is: grey off,
+// amber connecting, green connected.
+func (a *app) teacherDot() ui.Color {
+	t := &a.teacher
+	switch {
+	case t.sess != nil:
+		return teacherGreen
+	case t.on:
+		return ui.Hex("#f5a524")
+	}
+	return white.Alpha(0.35)
 }
 
 // teacherKeyForm asks for the DashScope API key, to keep and connect with.
@@ -68,29 +78,36 @@ func (a *app) teacherPanel(c *ui.Context) {
 	if !t.on && !t.ask && t.err == "" {
 		return
 	}
-	state := "正在连接 AI 老师…"
+	// What the teacher does now; listening, the microphone's meter shows
+	// it hears the listener.
+	state, listening := "正在连接 AI 老师…", false
 	switch {
 	case t.sess == nil:
 	case a.teacherSpeaking() || t.saying:
-		state = "老师在说"
+		state = "已连上 · 老师在说"
 	case t.answering || len(t.calls) > 0 && !a.pl.Playing():
-		state = "老师在想"
+		state = "已连上 · 老师在想"
 	case a.pl.Playing() || a.lesson.takes.out != nil:
-		state = "在放，老师在听歌"
+		state = "已连上 · 在放，放完老师再听你说"
 	case a.lesson.takes.rec != nil:
-		state = "在听你唱"
+		state, listening = "已连上 · 在听你唱", true
 	default:
-		state = "在听你说"
+		state, listening = "已连上 · 在听你说，直接说话就行", true
 	}
 	ui.Column(c.Key("teacher-panel")).Gap(6).Margin(6, 8, 0, 8).Padding(10, 14).Radius(14).Background(white.Alpha(0.06)).Children(func() {
 		if t.on {
 			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				dot := teacherGreen.Alpha(0.4)
-				if t.sess != nil {
-					dot = teacherGreen
-				}
-				ui.Box(c).Size(7, 7).Radius(3.5).Background(dot)
+				ui.Box(c).Size(7, 7).Radius(3.5).Background(a.teacherDot())
 				ui.Text(c, state).FontSize(12).FontWeight(600).TextColor(white.Alpha(0.6)).SingleLine()
+				if listening {
+					level := float32(0)
+					if t.level != nil {
+						level = math.Float32frombits(t.level.Load())
+					}
+					ui.Box(c).Width(60).Height(4).Radius(2).Background(white.Alpha(0.12)).Children(func() {
+						ui.Box(c).Width(60 * level).Height(4).Radius(2).Background(teacherGreen)
+					})
+				}
 			})
 		}
 		if t.err != "" {
@@ -120,14 +137,15 @@ func (a *app) teacherPanel(c *ui.Context) {
 			if u.teacher {
 				who, color = "老师：", white.Alpha(0.92)
 			}
-			ui.Text(c.Key(len(t.said)-len(said)+i), who+u.text).FontSize(13.5).LineHeight(1.35).TextColor(color).MaxLines(3)
+			ui.Text(c.Key(len(t.said)-len(said)+i), who+strings.TrimSpace(u.text)).FontSize(13.5).LineHeight(1.35).TextColor(color).MaxLines(3)
 		}
 		if t.hearing != "" {
 			ui.Text(c, "你："+t.hearing).FontSize(13.5).LineHeight(1.35).TextColor(white.Alpha(0.4)).MaxLines(2)
 		}
 	})
 	if t.on {
-		// What it does now changes as its voice plays out.
-		c.After(200 * time.Millisecond)
+		// What it does now changes as its voice plays out, and the meter
+		// moves.
+		c.After(100 * time.Millisecond)
 	}
 }

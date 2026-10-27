@@ -19,6 +19,7 @@ import (
 type fakeMic struct {
 	got     func([]float32)
 	stopped bool
+	opens   int // times the microphone was opened
 }
 
 func (m *fakeMic) Stop() { m.stopped = true }
@@ -46,7 +47,8 @@ func takeAppPosting(t *testing.T, post func(func())) (*app, *ui.Tester, *fakeMic
 	m := &fakeMic{}
 	old := startMic
 	startMic = func(got func([]float32)) (interface{ Stop() }, error) {
-		m.got = got
+		m.got, m.stopped = got, false
+		m.opens++
 		return m, nil
 	}
 	t.Cleanup(func() { startMic = old })

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/egoist/mygo/audio"
 	"golang.org/x/net/websocket"
 )
 
@@ -207,5 +208,26 @@ func TestVoice(t *testing.T) {
 	v.Close()
 	if _, err := v.Read(make([]float32, 10)); err != io.EOF {
 		t.Errorf("closed, read %v", err)
+	}
+}
+
+// Played by a real audio player, a voice stops speaking once what it said
+// has played: the player's position stops a few frames short of the end,
+// reading ahead to smooth them, and the voice used to speak on forever.
+func TestVoiceEndsOnPlayer(t *testing.T) {
+	v := NewVoice()
+	out := audio.NewPlayer(v)
+	out.SetVolume(0)
+	out.Play()
+	defer func() { v.Close(); out.Close() }()
+	v.Say(make([]float32, OutRate*3/10))
+	if !v.Speaking(out.Position()) {
+		t.Fatal("not speaking, just said")
+	}
+	for deadline := time.Now().Add(3 * time.Second); v.Speaking(out.Position()); {
+		if time.Now().After(deadline) {
+			t.Fatalf("speaking on at %v, 300 ms said", out.Position())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
