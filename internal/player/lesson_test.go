@@ -238,3 +238,85 @@ func TestSeekStopsSingingAlong(t *testing.T) {
 		t.Errorf("singing along %v, heard %v", p.SingingAlong(), heard)
 	}
 }
+
+// Sung through, the song plays on past a line's end, softly, until
+// stopped; then it pauses, telling SingAlong.
+func TestSingThrough(t *testing.T) {
+	ch, p := posted()
+	defer p.out.Close()
+	p.SetLyrics(lessonLines)
+	p.Guide = func() float64 { return 0.25 }
+	var heard []bool
+	p.SingAlong = func(on bool) { heard = append(heard, on) }
+	p.SingThrough(0)
+	time.Sleep(lineLead + 300*time.Millisecond + lineTail + 400*time.Millisecond)
+	for len(ch) > 0 {
+		next(t, ch)
+	}
+	if !p.Playing() || !p.SingingThrough() || !p.SingingAlong() {
+		t.Fatalf("past the line: playing %v, through %v, along %v", p.Playing(), p.SingingThrough(), p.SingingAlong())
+	}
+	p.StopLine()
+	if p.Playing() || p.SingingThrough() || len(heard) != 2 || heard[1] {
+		t.Errorf("stopped: playing %v, through %v, heard %v", p.Playing(), p.SingingThrough(), heard)
+	}
+}
+
+// Under a take, the song plays from where it was sung, softly, for as
+// long as the take, then pauses, telling SingAlong nothing.
+func TestPlayUnder(t *testing.T) {
+	ch, p := posted()
+	defer p.out.Close()
+	p.SetLyrics(lessonLines)
+	var heard []bool
+	p.SingAlong = func(on bool) { heard = append(heard, on) }
+	full := p.fade.gain
+	p.PlayUnder(20*time.Second, 300*time.Millisecond, 1)
+	if pos := p.Position(); pos != 20*time.Second {
+		t.Errorf("under the take from %v", pos)
+	}
+	if g := p.fade.gain; g != full*underVolume {
+		t.Errorf("under the take at %v, want %v", g, full*underVolume)
+	}
+	until(t, ch, func() bool { return !p.Playing() })
+	if pos := p.out.Position(); pos < 20300*time.Millisecond || pos > 21*time.Second {
+		t.Errorf("paused at %v", pos)
+	}
+	if len(heard) != 0 || p.PlayingUnder() {
+		t.Errorf("heard %v, under %v", heard, p.PlayingUnder())
+	}
+}
+
+// Under a take sung slower, the song plays at the take's tempo, not the
+// lesson's now, for as much of the song as was sung; it used to play at
+// the lesson's, running ahead of the voice and stopping short.
+func TestPlayUnderAtTakeTempo(t *testing.T) {
+	ch, p := posted()
+	p.out.Close()
+	p.shift = newShifter(silence{})
+	out := audio.NewPlayer(p.shift)
+	out.SetVolume(0)
+	out.Play()
+	p.Attach(out)
+	p.fade.attach(out, 1)
+	defer out.Close()
+	p.SetLyrics(lessonLines)
+	p.SetTempo(1)
+	start := time.Now()
+	p.PlayUnder(20*time.Second, 400*time.Millisecond, TempoSlow)
+	if s := p.out.Speed(); s != TempoSlow {
+		t.Errorf("under the take at speed %v", s)
+	}
+	// Changing the lesson's tempo leaves the song under the take as it is.
+	p.SetTempo(TempoSlower)
+	if s := p.out.Speed(); s != TempoSlow {
+		t.Errorf("tempo changed, under the take at speed %v", s)
+	}
+	until(t, ch, func() bool { return !p.Playing() })
+	if took := time.Since(start); took < 350*time.Millisecond {
+		t.Errorf("under a take of 400ms, the song took %v", took)
+	}
+	if pos := p.out.Position(); pos < 20300*time.Millisecond || pos > 20900*time.Millisecond {
+		t.Errorf("paused at %v, want 300ms of the song", pos)
+	}
+}

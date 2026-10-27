@@ -151,6 +151,11 @@ func (p *Player) ended() {
 		p.lineEnded()
 		return
 	}
+	if p.lesson.through {
+		// Sung to the end: it stops there, not going on to the next.
+		p.StopLine()
+		return
+	}
 	if p.repeat == RepeatOne {
 		p.out.Seek(0)
 		p.out.Play()
@@ -540,8 +545,11 @@ func (p *Player) applyGain() {
 	if p.Normalize != nil && p.Normalize() {
 		g *= p.gain
 	}
-	if p.lesson.along {
+	switch {
+	case p.lesson.along:
 		g *= p.guide()
+	case p.lesson.under:
+		g *= underVolume
 	}
 	p.fade.setGain(g)
 }
