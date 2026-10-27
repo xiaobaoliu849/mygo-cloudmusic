@@ -89,8 +89,15 @@ func throughLimit(from, length time.Duration, tempo float64) time.Duration {
 // the app as the song plays for the listener to sing along with it: to
 // record them as they do, and play them back once it stops.
 func (a *app) hookLesson() {
-	a.pl.Guide = func() float64 { return a.settings.Guide }
-	a.pl.Records = func() bool { return a.settings.AutoRecord }
+	// With the teacher on, a line plays once and pauses: the teacher says
+	// what comes next.
+	a.pl.Guide = func() float64 {
+		if a.teacher.on {
+			return 0
+		}
+		return a.settings.Guide
+	}
+	a.pl.Records = func() bool { return a.settings.AutoRecord && !a.teacher.on }
 	a.pl.SingAlong = func(on bool) {
 		t := &a.lesson.takes
 		if !on {
@@ -219,7 +226,8 @@ func (a *app) stopRecording() {
 		go saveTake(song, rec.key, samples)
 	}
 	play := func() {
-		if !a.pl.Playing() {
+		// The teacher plays it back if it wants to.
+		if !a.pl.Playing() && !a.teacher.on {
 			a.playTake(rec.key)
 		}
 	}

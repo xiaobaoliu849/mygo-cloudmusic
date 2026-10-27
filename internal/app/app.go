@@ -109,6 +109,7 @@ type app struct {
 	lyricTrack  int64
 	queueList   ui.ListState
 	lesson      lessonState
+	teacher     teacherState
 	queueAt     int // the row of the queue pane last scrolled to, -1 while it is hidden
 	comments    commentState
 	tabCount    rollState // the count on the comments' tab, as it rolls

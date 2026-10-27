@@ -18,6 +18,7 @@ type lessonState struct {
 	through bool // sing the song through, not a line at a time
 	loop    bool // a line chosen plays over and over, not once
 	more    bool // the lesson's settings show
+	pointed int  // the line the teacher points to, plus one; 0 for none
 	scroll  ui.ScrollState
 	track   int64 // the track the pane last showed
 	at      int   // the line it last scrolled to
@@ -47,22 +48,19 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 		return
 	}
 	if ls.track != tr.ID {
-		ls.track, ls.at, ls.scroll = tr.ID, -2, ui.ScrollState{}
+		ls.track, ls.at, ls.scroll, ls.pointed = tr.ID, -2, ui.ScrollState{}, 0
 		a.forgetTakes()
 	}
 	a.checkTake()
-	chosen, _ := pl.Line()
 	pos := pl.Position()
 	sung := lyrics.Index(lines, pos)
 	if pl.Playing() && sung+1 < len(lines) {
 		// Light the next line as it begins.
 		c.After(lines[sung+1].At - pos + 20*time.Millisecond)
 	}
-	// The line to start from: the one chosen, else the one sung now.
-	at := chosen
-	if at < 0 {
-		at = max(0, sung)
-	}
+	// The line to start from: the one the teacher points to, else the one
+	// chosen, else the one sung now.
+	at := a.lessonAt(lines)
 	// The line to keep in view: the one sung as the song plays on, sung
 	// through or under the take of it, else the one to start from; not
 	// the one before, which the song plays in over.
@@ -113,6 +111,7 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 		})
 	})
 
+	a.teacherPanel(c)
 	a.lessonStatus(c, at, sung)
 	a.lessonDock(c, at, len(lines))
 
@@ -135,6 +134,7 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 // straight to singing it; sung through, the song plays on from it.
 func (a *app) startLesson(n int, again bool) {
 	ls := &a.lesson
+	ls.pointed = 0
 	a.stopRecording()
 	a.stopTake()
 	switch {
@@ -218,7 +218,8 @@ func (a *app) lessonStatus(c *ui.Context, at, sung int) {
 func (a *app) lessonDock(c *ui.Context, at, count int) {
 	ls := &a.lesson
 	ui.Row(c.Key("dock")).Height(76).AlignItems(ui.Center).Padding(0, 8, 8, 8).Children(func() {
-		ui.Row(c).Grow(1).Basis(0).MinWidth(0).Children(func() {
+		ui.Row(c).Grow(1).Basis(0).MinWidth(0).Gap(8).AlignItems(ui.Center).Children(func() {
+			a.teacherButton(c)
 			choice(c, "学法", []choiceOption{{"逐句", 0}, {"整首", 1}}, boolValue(ls.through), func(v float64) {
 				if through := v == 1; through != ls.through {
 					a.stopLesson()

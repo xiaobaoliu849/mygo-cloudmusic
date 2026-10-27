@@ -1,0 +1,599 @@
+package app
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/audio"
+
+	"netease-music-mygo/internal/lyrics"
+	"netease-music-mygo/internal/mic"
+	"netease-music-mygo/internal/player"
+	"netease-music-mygo/internal/teacher"
+)
+
+// A teacherSession is the conversation with the AI teacher: the model's,
+// or a test's.
+type teacherSession interface {
+	Hear(samples []float32) error
+	Instruct(instructions string) error
+	Tell(text string) error
+	Answer(id string, result any) error
+	Respond() error
+	Close()
+}
+
+// dialTeacher connects to the teacher; tests swap it.
+var dialTeacher = func(cfg teacher.Config, got func(teacher.Event)) (teacherSession, error) {
+	s, err := teacher.Dial(cfg, got)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// teacherSecret is what the DashScope API key is kept as, in the system's
+// credential store.
+const teacherSecret = "dashscope-api-key"
+
+// teacherKey is the DashScope API key the teacher connects with: from the
+// environment if it is set there, else as the listener pasted it, kept
+// in the system's credential store rather than in the app's files.
+var teacherKey = func() string {
+	if key := os.Getenv("DASHSCOPE_API_KEY"); key != "" {
+		return key
+	}
+	b, err := mygo.Secrets.Get(teacherSecret)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// saveTeacherKey keeps the key the listener pasted; tests swap it.
+var saveTeacherKey = func(key string) error { return mygo.Secrets.Set(teacherSecret, []byte(key)) }
+
+// teacherMic records for the teacher to hear; tests swap it.
+var teacherMic = func(got func([]float32)) (interface{ Stop() }, error) { return startMic(got) }
+
+// teacherState is the AI teacher: a voice model the listener talks with,
+// which runs the lesson through the tools the app gives it, playing a
+// line, then hearing the listener sing it, and saying how it went.
+type teacherState struct {
+	on   bool           // the listener turned the teacher on
+	ask  bool           // it asks for the API key, with none, or to change it
+	key  string         // the key being pasted
+	gen  int            // counts sessions, to drop what an ended one sends
+	sess teacherSession // nil while it connects
+	err  string         // why it went wrong, to show
+
+	said      []utterance // the conversation, oldest first
+	hearing   string      // what the listener says so far, to be revised
+	saying    bool        // the teacher's last utterance goes on
+	answering bool        // the teacher is responding
+
+	// calls are the response's calls of tools: run in turn once it is
+	// done and heard, each once what the one before started has ended.
+	calls []*teacherCall
+
+	song  int64 // the track whose lyrics the teacher was told
+	voice *teacher.Voice
+	out   *audio.Player // plays voice
+	mic   interface{ Stop() }
+	open  *atomic.Bool // the microphone goes to the teacher
+	quit  chan struct{}
+}
+
+// An utterance is something the teacher or the listener said.
+type utterance struct {
+	teacher bool
+	text    string
+}
+
+// A teacherCall is the teacher calling one of the app's tools: what it
+// came to, and, for what plays, whether it plays on, to tell the teacher
+// once it ends.
+type teacherCall struct {
+	teacher.Call
+	ran    bool
+	result any
+	busy   func() bool
+}
+
+// startTeacher connects to the teacher, or, with no API key, asks for one.
+func (a *app) startTeacher() {
+	key := teacherKey()
+	if key == "" {
+		a.stopTeacher()
+		a.teacher.ask, a.teacher.err = true, ""
+		return
+	}
+	a.connectTeacher(key)
+}
+
+// pasteTeacherKey keeps the key the listener pasted, and connects with it.
+func (a *app) pasteTeacherKey() {
+	t := &a.teacher
+	key := strings.TrimSpace(t.key)
+	if key == "" {
+		return
+	}
+	t.key = ""
+	err := saveTeacherKey(key)
+	a.connectTeacher(key)
+	if err != nil {
+		t.err = "API Key 存不进系统的凭据管理器，这次能用，下次还要再粘贴：" + err.Error()
+	}
+}
+
+// connectTeacher connects to the teacher with key, telling it the song
+// playing.
+func (a *app) connectTeacher(key string) {
+	t := &a.teacher
+	a.stopTeacher()
+	t.on, t.err = true, ""
+	gen := t.gen
+	t.song = a.lyricsTrack()
+	cfg := teacher.Config{Key: key, Instructions: a.teacherInstructions(), Tools: teacherTools}
+	got := func(e teacher.Event) {
+		a.post(func() {
+			if a.teacher.gen == gen {
+				a.teacherEvent(e)
+			}
+		})
+	}
+	go func() {
+		s, err := dialTeacher(cfg, got)
+		a.post(func() { a.teacherDialed(gen, s, err) })
+	}()
+}
+
+// teacherDialed starts the session of gen once it connects: the teacher's
+// voice playing, the microphone going to it.
+func (a *app) teacherDialed(gen int, s teacherSession, err error) {
+	t := &a.teacher
+	if gen != t.gen || !t.on {
+		if s != nil {
+			s.Close()
+		}
+		return
+	}
+	if err != nil {
+		t.on, t.err = false, "连不上 AI 老师："+err.Error()
+		return
+	}
+	t.sess = s
+	t.voice = teacher.NewVoice()
+	t.out = audio.NewPlayer(t.voice)
+	t.out.Play()
+	open := &atomic.Bool{}
+	t.open = open
+	down := mic.NewDownsampler(teacher.InRate)
+	m, err := teacherMic(func(samples []float32) {
+		if open.Load() {
+			s.Hear(down.Next(samples))
+		}
+	})
+	if err != nil {
+		t.err = "麦克风打不开：" + err.Error()
+	}
+	t.mic = m
+	t.quit = make(chan struct{})
+	go a.teacherTicks(gen, t.quit)
+	// The teacher speaks first: it answers nothing before it hears
+	// something, so it hears the listener came in.
+	s.Tell(a.teacherHello())
+	s.Respond()
+	t.answering = true
+}
+
+// teacherHello tells the teacher the listener turned it on, and where.
+func (a *app) teacherHello() string {
+	lines, _ := a.pl.Lyrics()
+	if len(lines) == 0 {
+		return "（学生刚打开 AI 老师，还没有放有歌词的歌。简短地打个招呼，请他先放一首。）"
+	}
+	return fmt.Sprintf("（学生刚打开 AI 老师，歌词停在第 %d 句。简短地打个招呼，然后开始教这一句。）", a.lessonAt(lines)+1)
+}
+
+// teacherTicks has the app look in on the teacher ten times a second,
+// until quit.
+func (a *app) teacherTicks(gen int, quit chan struct{}) {
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-quit:
+			return
+		case <-tick.C:
+			a.post(func() {
+				if a.teacher.gen == gen {
+					a.teacherTick()
+				}
+			})
+		}
+	}
+}
+
+// stopTeacher ends the session, keeping what was said, to read.
+func (a *app) stopTeacher() {
+	t := &a.teacher
+	if t.quit != nil {
+		close(t.quit)
+	}
+	if t.mic != nil {
+		t.mic.Stop()
+	}
+	if t.sess != nil {
+		t.sess.Close()
+	}
+	if t.voice != nil {
+		// Closed first, it lets go of the player waiting on it.
+		t.voice.Close()
+	}
+	if t.out != nil {
+		t.out.Close()
+	}
+	*t = teacherState{gen: t.gen + 1, said: t.said, err: t.err}
+}
+
+// teacherEvent hears what the teacher sends.
+func (a *app) teacherEvent(e teacher.Event) {
+	t := &a.teacher
+	switch e.Kind {
+	case teacher.Hearing:
+		t.hearing = e.Text
+	case teacher.Heard:
+		t.hearing = ""
+		if e.Text != "" {
+			u := utterance{text: e.Text}
+			if t.saying {
+				// Written down as the teacher had started to answer: it goes
+				// before the answer.
+				t.said = append(t.said[:len(t.said)-1], u, t.said[len(t.said)-1])
+			} else {
+				t.said = append(t.said, u)
+			}
+		}
+		// The listener stopped singing: the take of it ends.
+		if a.lesson.takes.rec != nil {
+			a.stopRecording()
+		}
+	case teacher.Answering:
+		t.answering, t.err = true, ""
+	case teacher.Saying:
+		if !t.saying {
+			t.said = append(t.said, utterance{teacher: true})
+			t.saying = true
+		}
+		t.said[len(t.said)-1].text += e.Text
+	case teacher.Speech:
+		if t.voice != nil {
+			t.voice.Say(e.Audio)
+		}
+	case teacher.Calling:
+		t.calls = append(t.calls, &teacherCall{Call: e.Call})
+	case teacher.Answered:
+		t.answering, t.saying = false, false
+	case teacher.Failed:
+		t.err = e.Err.Error()
+	case teacher.Closed:
+		if e.Err != nil {
+			t.err = "和 AI 老师断开了：" + e.Err.Error()
+		}
+		a.stopTeacher()
+	}
+	if len(t.said) > 60 {
+		t.said = t.said[len(t.said)-60:]
+	}
+}
+
+// teacherSpeaking reports whether the teacher's voice plays.
+func (a *app) teacherSpeaking() bool {
+	t := &a.teacher
+	return t.voice != nil && t.out != nil && t.voice.Speaking(t.out.Position())
+}
+
+// teacherTick runs the teacher's calls once it has finished speaking,
+// tells it the lyrics of another song, and lets it hear the microphone
+// only while nothing plays: it has no ear for its own voice, or the
+// music, apart from the listener's.
+func (a *app) teacherTick() {
+	t := &a.teacher
+	if t.sess == nil {
+		return
+	}
+	if song := a.lyricsTrack(); song != 0 && song != t.song {
+		t.song = song
+		t.sess.Instruct(a.teacherInstructions())
+	}
+	speaking := a.teacherSpeaking()
+	if !speaking && !t.answering {
+		a.runCalls()
+	}
+	t.open.Store(!speaking && !t.answering && len(t.calls) == 0 && !a.pl.Playing() && a.lesson.takes.out == nil)
+}
+
+// lyricsTrack is the track playing once its lyrics are loaded, else 0.
+func (a *app) lyricsTrack() int64 {
+	tr := a.pl.Current()
+	if _, loaded := a.pl.Lyrics(); tr == nil || !loaded {
+		return 0
+	}
+	return tr.ID
+}
+
+// runCalls runs the teacher's calls in turn, each once what the one
+// before started has ended, then tells the teacher what they came to,
+// for it to go on.
+func (a *app) runCalls() {
+	t := &a.teacher
+	if len(t.calls) == 0 {
+		return
+	}
+	for _, c := range t.calls {
+		if !c.ran {
+			c.ran = true
+			c.result, c.busy = a.runTool(c.Call)
+		}
+		if c.busy != nil && c.busy() {
+			return
+		}
+	}
+	for _, c := range t.calls {
+		t.sess.Answer(c.ID, c.result)
+	}
+	t.calls = nil
+	t.sess.Respond()
+	t.answering = true
+}
+
+// toolError is what a tool that could not do what was asked comes to.
+func toolError(why string) map[string]any { return map[string]any{"error": why} }
+
+// runTool does what the teacher called c for, returning what it came to
+// and, for what plays, whether it plays on.
+func (a *app) runTool(c teacher.Call) (any, func() bool) {
+	lines, _ := a.pl.Lyrics()
+	if len(lines) == 0 && c.Name != "play_song" && c.Name != "pause" && c.Name != "slow_down" {
+		return toolError("现在没有歌词：请学生先放一首有歌词的歌"), nil
+	}
+	at := a.lessonAt(lines)
+	playing := func() bool { return a.pl.Playing() }
+	switch c.Name {
+	case "get_lyrics":
+		return a.lyricsForTeacher(), nil
+	case "play_line", "loop_line":
+		n, ok := teacherLine(lines, c.Args, at)
+		if !ok {
+			return toolError(fmt.Sprintf("没有第 %v 句", c.Args["n"])), nil
+		}
+		a.stopRecording()
+		a.stopTake()
+		a.lesson.pointed = 0
+		if c.Name == "play_line" {
+			ok = a.pl.PlayLine(n)
+		} else {
+			times := 2
+			if v, isNum := c.Args["times"].(float64); isNum {
+				times = min(max(int(v), 1), 5)
+			}
+			ok = a.pl.LoopLine(n, times)
+		}
+		if !ok {
+			return toolError("歌还没加载好，等一下再试"), nil
+		}
+		r := lineFor(lines, n)
+		r["played"] = "播完了，已暂停"
+		return r, playing
+	case "play_song":
+		a.stopTake()
+		if !a.pl.Playing() {
+			a.pl.TogglePlay()
+		}
+		return map[string]any{"playing": true, "note": "歌在放，学生暂停前你听不到他说话"}, nil
+	case "pause":
+		a.stopTake()
+		if a.pl.Playing() {
+			if _, alone := a.pl.Line(); alone || a.pl.SingingThrough() {
+				a.pl.StopLine()
+			} else {
+				a.pl.TogglePlay()
+			}
+		}
+		return map[string]any{"paused": true}, nil
+	case "slow_down":
+		rate := 0.75
+		if v, ok := c.Args["rate"].(float64); ok {
+			rate = v
+		}
+		rate = min(max(rate, 0.5), 1)
+		a.settings.Tempo = rate
+		a.pl.SetTempo(rate)
+		a.settings.save()
+		return map[string]any{"rate": a.pl.Tempo()}, nil
+	case "highlight_line", "next_line", "previous_line":
+		n, ok := at, true
+		switch c.Name {
+		case "highlight_line":
+			n, ok = teacherLine(lines, c.Args, at)
+		case "next_line":
+			n, ok = stepLine(lines, at, 1)
+		case "previous_line":
+			n, ok = stepLine(lines, at, -1)
+		}
+		if !ok {
+			return toolError("没有那一句了"), nil
+		}
+		a.lesson.pointed = n + 1
+		return lineFor(lines, n), nil
+	case "start_recording":
+		n, ok := teacherLine(lines, c.Args, at)
+		if !ok {
+			return toolError(fmt.Sprintf("没有第 %v 句", c.Args["n"])), nil
+		}
+		if a.pl.Playing() {
+			a.runTool(teacher.Call{Name: "pause"})
+		}
+		a.lesson.pointed = n + 1
+		a.record(n, takeLimit(lines[n], a.pl.Tempo()), max(0, lines[n].At-player.LineLead))
+		if a.lesson.takes.rec == nil {
+			return toolError("录不了音：" + a.lesson.takes.err), nil
+		}
+		r := lineFor(lines, n)
+		r["recording"] = "学生要清唱这一句了：简短地请他开始，然后安静地听，他唱完停下时录音自动结束"
+		return r, nil
+	case "stop_recording":
+		a.stopRecording()
+		return map[string]any{"stopped": true}, nil
+	case "play_recording":
+		n, ok := teacherLine(lines, c.Args, at)
+		if !ok {
+			return toolError(fmt.Sprintf("没有第 %v 句", c.Args["n"])), nil
+		}
+		if _, sung := a.lesson.takes.sung[n]; !sung {
+			return toolError(fmt.Sprintf("第 %d 句还没有录音", n+1)), nil
+		}
+		a.playTake(n)
+		r := lineFor(lines, n)
+		r["played"] = "学生唱的放完了，原曲小声伴着"
+		return r, func() bool { o := a.lesson.takes.out; return o != nil && o.Playing() }
+	}
+	return toolError("没有这个工具：" + c.Name), nil
+}
+
+// lessonAt is the line the lesson is at: the one the teacher points to,
+// else the one chosen, else the one sung now.
+func (a *app) lessonAt(lines []lyrics.Line) int {
+	if p := a.lesson.pointed; p > 0 && p <= len(lines) {
+		return p - 1
+	}
+	if n, _ := a.pl.Line(); n >= 0 {
+		return n
+	}
+	return max(0, lyrics.Index(lines, a.pl.Position()))
+}
+
+// teacherLine is the line the teacher's args name, numbered from 1 as the
+// lesson shows them, else at, reporting false for no such line or one of
+// the credits, which are not sung.
+func teacherLine(lines []lyrics.Line, args map[string]any, at int) (int, bool) {
+	n := at
+	if v, ok := args["n"].(float64); ok {
+		n = int(v) - 1
+	}
+	return n, n >= 0 && n < len(lines) && !lyrics.IsCredit(lines[n].Text)
+}
+
+// stepLine is the line sung next after at, step 1, or before it, step -1.
+func stepLine(lines []lyrics.Line, at, step int) (int, bool) {
+	for n := at + step; n >= 0 && n < len(lines); n += step {
+		if !lyrics.IsCredit(lines[n].Text) {
+			return n, true
+		}
+	}
+	return at, false
+}
+
+// lineFor is line n for the teacher: its number, words and translation.
+func lineFor(lines []lyrics.Line, n int) map[string]any {
+	r := map[string]any{"n": n + 1, "text": lines[n].Text}
+	if tl := lines[n].Translation; tl != "" {
+		r["translation"] = tl
+	}
+	return r
+}
+
+// lyricsForTeacher is the song playing and its lines, for the teacher.
+func (a *app) lyricsForTeacher() map[string]any {
+	tr := a.pl.Current()
+	lines, _ := a.pl.Lyrics()
+	if tr == nil || len(lines) == 0 {
+		return toolError("现在没有歌词：请学生先放一首有歌词的歌")
+	}
+	var sung []map[string]any
+	for n, l := range lines {
+		if !lyrics.IsCredit(l.Text) {
+			sung = append(sung, lineFor(lines, n))
+		}
+	}
+	return map[string]any{"song": tr.Name, "artists": tr.ArtistNames(), "lines": sung}
+}
+
+// teacherInstructions tells the teacher how to teach, and the song.
+func (a *app) teacherInstructions() string {
+	var b strings.Builder
+	b.WriteString(teacherPrompt)
+	tr := a.pl.Current()
+	lines, _ := a.pl.Lyrics()
+	if tr == nil || len(lines) == 0 {
+		b.WriteString("\n\n现在没有在放有歌词的歌：请学生先在播放器里放一首。")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "\n\n现在的歌：《%s》，%s。歌词：\n", tr.Name, tr.ArtistNames())
+	for n, l := range lines {
+		if lyrics.IsCredit(l.Text) {
+			continue
+		}
+		fmt.Fprintf(&b, "%d. %s", n+1, l.Text)
+		if l.Translation != "" {
+			fmt.Fprintf(&b, "（%s）", l.Translation)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// teacherPrompt is how the teacher teaches.
+const teacherPrompt = `你是一位耐心、温暖的声乐老师，在一个音乐播放器里教学生唱歌，一次教一句。用中文和学生说话，每次只说一两句，简短自然。你自己不唱：原曲就是示范，用工具放给学生听。
+
+一句的教法：
+1. 用 play_line 把这一句放给学生听。它播完才返回，返回前不要说话。
+2. 说"现在你来唱"，然后调用 start_recording，安静地听学生清唱。
+3. 学生唱完后，对照这一句的歌词，指出一两个具体的问题：哪个音发得不准、太短或太长、在哪换气、节奏快了还是慢了；给一个口型、舌位或气息的小建议，再鼓励一下。
+4. 问学生是再来一遍，还是学下一句。再来用 play_line 或 loop_line，下一句先 next_line 再 play_line。
+
+学生也可以随时提要求：放慢（slow_down）、听整首（play_song）、听自己唱的（play_recording）。歌词的行号从 1 开始，和学生屏幕上的编号一样。日语歌词可以用假名或罗马音帮学生读准。歌在放的时候你听不到学生说话。`
+
+// teacherTools are the tools the teacher runs the lesson with.
+var teacherTools = []teacher.Tool{
+	{Name: "get_lyrics", Description: "取现在这首歌的全部歌词，带行号和翻译。换了歌或不确定时用。"},
+	{Name: "play_line", Description: "把第 n 句放给学生听（从这一句前一点点开始），放完自动暂停，放完才返回。不给 n 就放现在这一句。", Params: lineParams(false)},
+	{Name: "loop_line", Description: "把第 n 句连着放 times 遍（1 到 5），放完暂停才返回。", Params: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"n":     lineParam,
+			"times": map[string]any{"type": "integer", "description": "放几遍，1 到 5"},
+		},
+	}},
+	{Name: "play_song", Description: "从现在的位置放整首歌，直到学生暂停。"},
+	{Name: "pause", Description: "暂停播放。"},
+	{Name: "slow_down", Description: "设教唱的速度：1 是原速，0.9 或 0.75 更慢，音调不变。之后放的句子都用这个速度。", Params: map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"rate": map[string]any{"type": "number", "description": "速度，0.5 到 1"}},
+		"required":   []string{"rate"},
+	}},
+	{Name: "highlight_line", Description: "把歌词移到第 n 句并标出来，不放。", Params: lineParams(true)},
+	{Name: "next_line", Description: "移到下一句，返回它的歌词，不放。"},
+	{Name: "previous_line", Description: "移到上一句，返回它的歌词，不放。"},
+	{Name: "start_recording", Description: "开始录学生清唱现在这一句（或第 n 句），返回这一句的歌词。调用后简短地请学生开始，然后安静地听；学生唱完停下，录音自动结束。", Params: lineParams(false)},
+	{Name: "stop_recording", Description: "停止录音。"},
+	{Name: "play_recording", Description: "把学生唱的这一句（或第 n 句）放给他听，原曲小声伴着，放完才返回。", Params: lineParams(false)},
+}
+
+// lineParam is a line's number, as a tool's parameter.
+var lineParam = map[string]any{"type": "integer", "description": "歌词的行号，从 1 开始"}
+
+// lineParams are the parameters of a tool taking a line, n, required or
+// else the line the lesson is at.
+func lineParams(required bool) map[string]any {
+	p := map[string]any{"type": "object", "properties": map[string]any{"n": lineParam}}
+	if required {
+		p["required"] = []string{"n"}
+	}
+	return p
+}
