@@ -53,3 +53,28 @@ func TestLessonPanePlaysLine(t *testing.T) {
 		t.Errorf("after 上一句, line %d", n)
 	}
 }
+
+// The guide's choice sets how loud a line plays to sing along with.
+func TestLessonGuideChoice(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: 7, Name: "春日影", Duration: 200000}})
+	a.pl.SetLyrics([]lyrics.Line{{At: 10 * time.Second, End: 13 * time.Second, Text: "悴んだ心ふるえる眼差し"}})
+	a.nowPlaying = true
+	a.npPane = paneLesson
+	tt := ui.NewTester(a.view, 1200, 800)
+	tt.Advance(time.Second)
+	tt.Frame()
+	for _, o := range []struct {
+		label string
+		v     float64
+	}{{"跟唱时原唱中等", guideMedium}, {"跟唱时原唱不放", 0}} {
+		if err := tt.Click(o.label); err != nil {
+			t.Fatal(err)
+		}
+		tt.Frame()
+		if a.settings.Guide != o.v {
+			t.Errorf("after %s, guide %v", o.label, a.settings.Guide)
+		}
+	}
+}

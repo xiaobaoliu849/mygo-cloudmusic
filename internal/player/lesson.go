@@ -12,6 +12,7 @@ import (
 type lesson struct {
 	line  int  // the line chosen, -1 for none
 	alone bool // the line plays alone: it pauses or loops at its end
+	along bool // it plays again, softly, for the listener to sing along
 	left  int  // how many more times it plays after this one; -1 forever
 	watch int  // counts the waits for the line's end, to drop stale ones
 }
@@ -27,12 +28,30 @@ const lineTail = 150 * time.Millisecond
 // whether it plays alone, to pause or loop at its end.
 func (p *Player) Line() (int, bool) { return p.lesson.line, p.lesson.alone }
 
-// PlayLine plays line n of the lyrics alone, then pauses at its end. It
+// SingingAlong reports whether the lesson's line plays again, softly, for
+// the listener to sing along with it.
+func (p *Player) SingingAlong() bool { return p.lesson.along }
+
+// guide is how loud the line plays as the listener sings along.
+func (p *Player) guide() float64 {
+	if p.Guide == nil {
+		return 0
+	}
+	return min(max(p.Guide(), 0), 1)
+}
+
+// GuideChanged hears that the guide's volume changed, to play the line
+// sung along with at it.
+func (p *Player) GuideChanged() { p.applyGain() }
+
+// PlayLine plays line n of the lyrics alone, then again, softly, for the
+// listener to sing along, if Guide says so, then pauses at its end. It
 // reports false, doing nothing, while the track or its lyrics load, or
 // with no line n.
 func (p *Player) PlayLine(n int) bool { return p.LoopLine(n, 1) }
 
-// LoopLine plays line n of the lyrics times times over, then pauses at
+// LoopLine plays line n of the lyrics times times over, each time once
+// to hear and once softly to sing along, as PlayLine does, then pauses at
 // its end; with times 0 or less, until something else plays. It reports
 // false, doing nothing, while the track or its lyrics load, or with no
 // line n.
@@ -45,6 +64,7 @@ func (p *Player) LoopLine(n, times int) bool {
 		left = -1
 	}
 	p.lesson = lesson{line: n, alone: true, left: left, watch: p.lesson.watch + 1}
+	p.applyGain()
 	p.fromLine()
 	return true
 }
@@ -68,6 +88,7 @@ func (p *Player) lessonLine() int {
 // a lesson.
 func (p *Player) EndLesson() {
 	p.lesson = lesson{line: -1, watch: p.lesson.watch + 1}
+	p.applyGain()
 }
 
 // span returns where the lesson's line plays from and pauses.
@@ -123,13 +144,24 @@ func (p *Player) checkLine() {
 	p.lineEnded()
 }
 
-// lineEnded plays the lesson's line again, if it has times left, or
+// lineEnded plays the lesson's line again: softly to sing along, once
+// heard, if Guide says so, and else if it has times left. Otherwise it
 // pauses, the lesson staying on it.
 func (p *Player) lineEnded() {
+	if !p.lesson.along && p.guide() > 0 {
+		p.lesson.along = true
+		p.applyGain()
+		p.fromLine()
+		return
+	}
+	// Loud again: to hear the line once more, or, pausing, once it plays
+	// again, not as it fades out.
+	p.lesson.along = false
 	if p.lesson.left != 0 {
 		if p.lesson.left > 0 {
 			p.lesson.left--
 		}
+		p.applyGain()
 		p.fromLine()
 		return
 	}

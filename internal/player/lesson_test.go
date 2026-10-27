@@ -107,3 +107,37 @@ func TestNextLine(t *testing.T) {
 		t.Error("played a line past the last")
 	}
 }
+
+// With a guide, a line plays once to hear, then again softly to sing
+// along, then pauses; playing on is loud again.
+func TestPlayLineSingsAlongSoftly(t *testing.T) {
+	ch, p := posted()
+	defer p.out.Close()
+	p.SetLyrics(lessonLines)
+	p.Guide = func() float64 { return 0.25 }
+	gain := func() float64 {
+		p.fade.mu.Lock()
+		defer p.fade.mu.Unlock()
+		return p.fade.gain
+	}
+	full := gain()
+	p.PlayLine(1)
+	until(t, ch, p.SingingAlong)
+	if g := gain(); g != full*0.25 {
+		t.Errorf("sang along at %v, want %v", g, full*0.25)
+	}
+	if !p.Playing() {
+		t.Fatal("paused before singing along")
+	}
+	until(t, ch, func() bool { return !p.Playing() })
+	if p.SingingAlong() {
+		t.Error("still singing along, paused")
+	}
+	if pos := p.out.Position(); pos > 11*time.Second {
+		t.Errorf("paused at %v", pos)
+	}
+	p.TogglePlay()
+	if g := gain(); g != full {
+		t.Errorf("played on at %v, want %v", g, full)
+	}
+}

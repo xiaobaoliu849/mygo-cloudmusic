@@ -89,6 +89,8 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 			ui.Spacer(c)
 			status := "点一句歌词，听完跟着唱"
 			switch {
+			case pl.SingingAlong():
+				status = fmt.Sprintf("第 %d / %d 句 · 跟着原唱唱", chosen+1, len(lines))
 			case chosen >= 0 && alone:
 				status = fmt.Sprintf("第 %d / %d 句 · 正在播放", chosen+1, len(lines))
 			case chosen >= 0:
@@ -96,6 +98,7 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 			}
 			ui.Text(c, status).FontSize(12.5).FontWeight(600).TextColor(white.Alpha(0.6))
 		})
+		a.guideChoice(c)
 	})
 
 	scroll := ui.Scroll(c.Key("lesson")).Grow(1).TrackScroll(&ls.scroll).Padding(0, 8, 120, 0)
@@ -149,4 +152,38 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 		target := lb.Y - box.Y + ls.scroll.Y - box.H*0.3
 		ls.scroll.ScrollTo(0, min(max(0, target), ls.scroll.MaxY), ui.Animation{Spring: ui.SpringOptions{Duration: 500 * time.Millisecond}})
 	}
+}
+
+// How loud a line plays the second time, to sing along with it.
+const (
+	guideSoft   = 0.2
+	guideMedium = 0.45
+)
+
+// guideChoice chooses how loud a line plays again once heard, for the
+// listener to sing along with it: not at all, softly, or half as loud.
+func (a *app) guideChoice(c *ui.Context) {
+	ui.Row(c).Gap(4).AlignItems(ui.Center).Padding(0, 0, 0, 8).Children(func() {
+		ui.Text(c, "跟唱时原唱").FontSize(12.5).FontWeight(600).TextColor(white.Alpha(0.5)).Margin(0, 6, 0, 0)
+		for _, o := range []struct {
+			label string
+			v     float64
+		}{{"不放", 0}, {"小声", guideSoft}, {"中等", guideMedium}} {
+			on := a.settings.Guide == o.v
+			b := ui.ButtonBase(c.Key(o.label)).Padding(4, 12).Radius(999).FocusRing(false).Label("跟唱时原唱" + o.label)
+			bg, fg := ui.Transparent, white.Alpha(0.55)
+			if on {
+				bg, fg = white.Alpha(0.14), white
+			} else if b.Hovered() {
+				bg = white.Alpha(0.06)
+			}
+			b.Background(b.AnimateColor("bg", bg, ui.Animation{Duration: 120 * time.Millisecond}))
+			b.Children(func() { ui.Text(c, o.label).FontSize(12.5).FontWeight(600).TextColor(fg) })
+			if b.Clicked() && !on {
+				a.settings.Guide = o.v
+				a.settings.save()
+				a.pl.GuideChanged()
+			}
+		}
+	})
 }

@@ -30,6 +30,10 @@ type Player struct {
 	// Normalize reports whether to even out the loudness of tracks, as
 	// the settings say.
 	Normalize func() bool
+	// Guide returns how loud, from 0 to 1, a lesson's line plays the
+	// second time, for the listener to sing along with it: 0 plays it
+	// once, then pauses.
+	Guide func() float64
 	// Cache keeps the songs played, if set.
 	Cache *Cache
 	// Changed, if set, hears that what plays, where it is or whether it
@@ -452,6 +456,7 @@ func (p *Player) TogglePlay() {
 		return
 	}
 	p.playing = true
+	p.applyGain()
 	if !p.seeking && !out.Playing() {
 		if out.Position() >= out.Duration()-time.Second {
 			out.Seek(0)
@@ -521,6 +526,9 @@ func (p *Player) applyGain() {
 	g := p.volume * p.volume
 	if p.Normalize != nil && p.Normalize() {
 		g *= p.gain
+	}
+	if p.lesson.along {
+		g *= p.guide()
 	}
 	p.fade.setGain(g)
 }
