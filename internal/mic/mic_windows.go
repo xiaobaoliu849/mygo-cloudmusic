@@ -31,8 +31,8 @@ const (
 	callbackEvent = 0x50000
 	formatPCM     = 1
 	headerDone    = 1
-	buffers       = 4
-	bufferFrames  = Rate / 20 // 50 ms each
+	buffers       = 10
+	bufferFrames  = Rate / 10 // 100 ms each: a second in all, for the goroutine running late
 )
 
 type waveFormat struct {
