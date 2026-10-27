@@ -156,6 +156,7 @@ func (a *app) settingsView(c *ui.Context) {
 
 		if a.captionsShown() {
 			group("播客", func() { a.captionSettings(row, c) })
+			group("跟唱", func() { a.vocalsSettings(row, c) })
 		}
 
 		group("缓存", func() {

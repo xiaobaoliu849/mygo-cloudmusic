@@ -183,6 +183,7 @@ func (a *app) startLesson(n int, again bool) {
 	default:
 		a.pl.PlayLine(n)
 	}
+	a.stopVocals()
 }
 
 // lessonBusy reports whether the lesson plays or records something the
@@ -190,7 +191,7 @@ func (a *app) startLesson(n int, again bool) {
 func (a *app) lessonBusy() bool {
 	_, alone := a.pl.Line()
 	t := &a.lesson.takes
-	return alone || a.pl.SingingThrough() || t.rec != nil || t.out != nil
+	return alone || a.pl.SingingThrough() || t.rec != nil || t.out != nil || a.vocalsPlaying()
 }
 
 // stopLesson stops what the lesson plays or records, the take recorded
@@ -199,6 +200,8 @@ func (a *app) stopLesson() {
 	t := &a.lesson.takes
 	a.teacherYield()
 	switch {
+	case a.vocalsPlaying():
+		a.stopVocals()
 	case t.out != nil:
 		a.stopTake()
 	case a.pl.SingingAlong() || a.pl.SingingThrough():
@@ -233,6 +236,12 @@ func (a *app) lessonStatus(c *ui.Context, at, sung int) {
 		got := len(t.rec.samples)
 		t.rec.mu.Unlock()
 		text, color = line+" · 跟着唱 · 录音中 "+clock(time.Duration(got)*time.Second/mic.Rate), white.Alpha(0.85)
+	case a.vocals.err != "":
+		text, color = a.vocals.err, ui.Hex("#f5a524")
+	case a.vocals.want != 0:
+		text = line + " · 正在分离原唱的人声…"
+	case a.vocals.out != nil:
+		text = line + " · 只听原唱的人声"
 	case t.out != nil:
 		text = "在放你唱的，原曲在下面小声伴着"
 	case pl.SingingThrough(), pl.SingingAlong():
@@ -297,6 +306,9 @@ func (a *app) lessonDock(c *ui.Context, lines []lyrics.Line, at int) {
 				if loop.Clicked() {
 					ls.loop = !ls.loop
 				}
+			}
+			if !ls.through && a.vocalsReady() {
+				a.vocalsButton(c, at)
 			}
 			key := at
 			if ls.through {

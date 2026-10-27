@@ -260,6 +260,10 @@ func loadLibs(dir string) error {
 		"SherpaOnnxVoiceActivityDetectorFlush":          &sherpa.vadFlush,
 		"SherpaOnnxVoiceActivityDetectorReset":          &sherpa.vadReset,
 		"SherpaOnnxDestroySpeechSegment":                &sherpa.destroySeg,
+		"SherpaOnnxCreateOfflineSourceSeparation":       &separation.create,
+		"SherpaOnnxDestroyOfflineSourceSeparation":      &separation.destroy,
+		"SherpaOnnxOfflineSourceSeparationProcess":      &separation.process,
+		"SherpaOnnxDestroySourceSeparationOutput":       &separation.free,
 	} {
 		sym, err := librarySymbol(h, name)
 		if err != nil || sym == 0 {

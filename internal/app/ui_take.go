@@ -413,6 +413,7 @@ func (a *app) playTake(key int) {
 		return
 	}
 	a.stopTake()
+	a.stopVocals()
 	d := time.Duration(len(tk.samples)) * time.Second / mic.Rate
 	if !a.pl.PlayUnder(tk.at, d, tk.tempo) && a.pl.Playing() {
 		a.pl.TogglePlay()

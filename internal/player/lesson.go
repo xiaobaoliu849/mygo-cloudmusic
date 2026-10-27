@@ -246,8 +246,8 @@ func (p *Player) span() (from, to time.Duration) {
 	if p.lesson.under {
 		return p.lesson.from, p.lesson.to
 	}
-	l := p.lyrics[p.lesson.line]
-	return max(0, l.At-lineLead), l.End + lineTail
+	from, to, _ = p.LineSpan(p.lesson.line)
+	return from, to
 }
 
 // fromLine plays the lesson's line from its start, and waits for its end.

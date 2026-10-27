@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"os"
@@ -398,7 +399,7 @@ func (a *app) teacherTick() {
 	if !speaking && !t.answering {
 		a.runCalls()
 	}
-	t.open.Store(!speaking && !t.answering && len(t.calls) == 0 && !a.pl.Playing() && a.lesson.takes.out == nil)
+	t.open.Store(!speaking && !t.answering && len(t.calls) == 0 && !a.pl.Playing() && a.lesson.takes.out == nil && !a.vocalsPlaying())
 }
 
 // lyricsTrack is the track playing once its lyrics are loaded, else 0.
@@ -464,6 +465,7 @@ func (a *app) runTool(c teacher.Call) (any, func() bool) {
 		}
 		a.stopRecording()
 		a.stopTake()
+		a.stopVocals()
 		a.lesson.pointed = 0
 		if c.Name == "play_line" {
 			ok = a.pl.PlayLine(n)
@@ -482,12 +484,14 @@ func (a *app) runTool(c teacher.Call) (any, func() bool) {
 		return r, playing
 	case "play_song":
 		a.stopTake()
+		a.stopVocals()
 		if !a.pl.Playing() {
 			a.pl.TogglePlay()
 		}
 		return map[string]any{"playing": true, "note": "歌在放，学生暂停前你听不到他说话"}, nil
 	case "pause":
 		a.stopTake()
+		a.stopVocals()
 		if a.pl.Playing() {
 			if _, alone := a.pl.Line(); alone || a.pl.SingingThrough() {
 				a.pl.StopLine()
@@ -552,6 +556,33 @@ func (a *app) runTool(c teacher.Call) (any, func() bool) {
 		r := lineFor(lines, n)
 		r["played"] = "学生唱的放完了，原曲小声伴着"
 		return r, func() bool { o := a.lesson.takes.out; return o != nil && o.Playing() }
+	case "play_vocals":
+		n, ok := teacherLine(lines, c.Args, at)
+		if !ok {
+			return toolError(fmt.Sprintf("没有第 %v 句", c.Args["n"])), nil
+		}
+		a.stopRecording()
+		a.stopTake()
+		a.lesson.pointed = n + 1
+		if !a.playVocals(n) {
+			return toolError(a.vocals.err), nil
+		}
+		r := lineFor(lines, n)
+		r["played"] = "原唱的人声放完了，已暂停"
+		// Separating can wait on the song's download: the lesson does not
+		// wait on it for ever.
+		until := time.Now().Add(vocalsWait)
+		return r, func() bool {
+			if a.vocalsPlaying() && time.Now().Before(until) {
+				return true
+			}
+			if why := a.vocals.err; a.vocals.want != 0 || why != "" {
+				a.stopVocals()
+				delete(r, "played")
+				r["error"] = cmp.Or(why, "人声分离太慢，没放出来") + "：改用 play_line 放原曲"
+			}
+			return false
+		}
 	}
 	return toolError("没有这个工具：" + c.Name), nil
 }
@@ -622,6 +653,9 @@ func (a *app) lyricsForTeacher() map[string]any {
 func (a *app) teacherInstructions() string {
 	var b strings.Builder
 	b.WriteString(teacherPrompt)
+	if a.vocalsReady() {
+		b.WriteString(vocalsPrompt)
+	}
 	tr := a.pl.Current()
 	lines, _ := a.pl.Lyrics()
 	if tr == nil || len(lines) == 0 {
@@ -680,6 +714,7 @@ var teacherTools = []teacher.Tool{
 	{Name: "start_recording", Description: "开始录学生清唱现在这一句（或第 n 句），返回这一句的歌词。调用后简短地请学生开始，然后安静地听；学生唱完停下，录音自动结束。", Params: lineParams(false)},
 	{Name: "stop_recording", Description: "停止录音。"},
 	{Name: "play_recording", Description: "把学生唱的这一句（或第 n 句）放给他听，原曲小声伴着，放完才返回。", Params: lineParams(false)},
+	{Name: "play_vocals", Description: "只放第 n 句（不给 n 就是现在这一句）原唱歌手的人声，去掉伴奏，按 slow_down 的速度、原调，当作你的示范唱给学生听；分离和放完才返回。学生没下载人声分离模型时会返回错误，请他在设置的「跟唱」里下载。", Params: lineParams(false)},
 }
 
 // lineParam is a line's number, as a tool's parameter.

@@ -87,12 +87,22 @@ func Installed(root string) bool {
 	if !Available() {
 		return false
 	}
+	return modelIn(root) && libsInstalled(root)
+}
+
+// modelIn reports whether the model's files are in root, whole.
+func modelIn(root string) bool {
 	for _, f := range modelFiles {
 		info, err := os.Stat(filepath.Join(root, ModelName, filepath.FromSlash(f.path)))
 		if err != nil || info.Size() != f.size {
 			return false
 		}
 	}
+	return true
+}
+
+// libsInstalled reports whether the libraries are in root, whole.
+func libsInstalled(root string) bool {
 	for _, f := range natives() {
 		info, err := os.Stat(filepath.Join(libDir(root), f.name))
 		if err != nil || info.Size() != f.size {
@@ -111,28 +121,9 @@ func Download(ctx context.Context, root string, progress func(done, total int64)
 		return ErrUnavailable
 	}
 	total := ModelSize()
-	var before int64 // the bytes of the files done
-	libs := libDir(root)
-	if err := os.MkdirAll(libs, 0o755); err != nil {
+	before, err := downloadNatives(ctx, root, total, progress)
+	if err != nil {
 		return err
-	}
-	for _, f := range natives() {
-		path := filepath.Join(libs, f.name)
-		if info, err := os.Stat(path); err == nil && info.Size() == f.size && digest(path) == f.sha256 {
-			before += f.gzSize
-			progress(before, total)
-			continue
-		}
-		gz := modelFile{path: f.name + ".gz", size: f.gzSize, sha256: f.gzSHA256}
-		err := fetch(ctx, nativeURL(f), path+".gz", gz, func(n int64) { progress(before+n, total) })
-		if err == nil {
-			err = gunzip(path+".gz", path, f)
-		}
-		if err != nil {
-			return err
-		}
-		before += f.gzSize
-		progress(before, total)
 	}
 	dir := filepath.Join(root, ModelName)
 	for _, f := range modelFiles {
@@ -159,6 +150,36 @@ func Download(ctx context.Context, root string, progress func(done, total int64)
 		progress(before, total)
 	}
 	return nil
+}
+
+// downloadNatives downloads the libraries into root, first of total bytes
+// to download, telling progress, and returns how many bytes of them are
+// in.
+func downloadNatives(ctx context.Context, root string, total int64, progress func(done, total int64)) (int64, error) {
+	var before int64 // the bytes of the files done
+	libs := libDir(root)
+	if err := os.MkdirAll(libs, 0o755); err != nil {
+		return 0, err
+	}
+	for _, f := range natives() {
+		path := filepath.Join(libs, f.name)
+		if info, err := os.Stat(path); err == nil && info.Size() == f.size && digest(path) == f.sha256 {
+			before += f.gzSize
+			progress(before, total)
+			continue
+		}
+		gz := modelFile{path: f.name + ".gz", size: f.gzSize, sha256: f.gzSHA256}
+		err := fetch(ctx, nativeURL(f), path+".gz", gz, func(n int64) { progress(before+n, total) })
+		if err == nil {
+			err = gunzip(path+".gz", path, f)
+		}
+		if err != nil {
+			return before, err
+		}
+		before += f.gzSize
+		progress(before, total)
+	}
+	return before, nil
 }
 
 // errDigest says a file came in other than the model's.
@@ -301,11 +322,14 @@ func digest(path string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Remove removes the model and its libraries from root.
+// Remove removes the model from root, and its libraries, unless the
+// model that separates the singing still runs on them.
 func Remove(root string) error {
 	err := os.RemoveAll(filepath.Join(root, ModelName))
-	if e := os.RemoveAll(libDir(root)); err == nil {
-		err = e
+	if _, e := os.Stat(filepath.Join(root, VocalsName)); e != nil {
+		if e := os.RemoveAll(libDir(root)); err == nil {
+			err = e
+		}
 	}
 	return err
 }

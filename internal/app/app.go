@@ -135,6 +135,7 @@ type app struct {
 	npCoverState          coverState    // the cover of Now Playing, as it is tilted and flicked
 	quiet                 quietState    // the quiet parts of the song playing, for its hot comments
 	captions              captionState  // the episode playing's captions, and the model that writes them
+	vocals                vocalsState   // the singing of the lesson's lines alone, and the model that separates it
 	sig                   playerSig
 	quitting              bool
 
