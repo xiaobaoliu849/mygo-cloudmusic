@@ -132,10 +132,16 @@ func (a *app) stage(c *ui.Context, tr *netease.Track, accent ui.Color) {
 				a.stageLine(c, &lines[cur], pos, f, w, h, 1, accent)
 			}
 
-			// The translation, and the line coming next, along the foot.
+			// The romaji, the translation, and the line coming next, along
+			// the foot.
 			ui.Column(c).Absolute().Left(0).Right(0).Bottom(24).AlignItems(ui.Center).Gap(8).PassThrough().Children(func() {
-				if cur >= 0 && lines[cur].Translation != "" {
-					ui.Text(c.Key("translation"), lines[cur].Translation).FontSize(18).FontWeight(600).TextColor(white.Alpha(0.72)).TextAlign(ui.Center)
+				if cur >= 0 {
+					if r := a.romaji(lines[cur]); r != "" {
+						ui.Text(c.Key("romaji"), r).FontSize(18).FontWeight(600).TextColor(white.Alpha(0.8)).TextAlign(ui.Center)
+					}
+					if tl := a.translation(lines[cur]); tl != "" {
+						ui.Text(c.Key("translation"), tl).FontSize(18).FontWeight(600).TextColor(white.Alpha(0.72)).TextAlign(ui.Center)
+					}
 				}
 				if cur+1 < len(lines) {
 					ui.Text(c.Key("next"), lines[cur+1].Text).FontSize(14).TextColor(white.Alpha(0.32)).TextAlign(ui.Center).SingleLine()

@@ -66,6 +66,11 @@ type settings struct {
 	// which the clock does not know of: found by lining takes up with the
 	// song, or set by ear.
 	Sync float64 `json:"sync"`
+	// HideRomaji and HideTranslation leave a line's romaji or translation
+	// out wherever lyrics show: once the listener can say a song, to sing
+	// it from the Japanese alone.
+	HideRomaji      bool `json:"hideRomaji"`
+	HideTranslation bool `json:"hideTranslation"`
 	// CacheMB is how many megabytes the songs kept on disk may take; 0
 	// keeps none.
 	CacheMB int `json:"cacheMB"`

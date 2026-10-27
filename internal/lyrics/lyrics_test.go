@@ -45,6 +45,19 @@ func TestParseYRC(t *testing.T) {
 	}
 }
 
+// Romaji goes to the word-timed line nearest its time, as NetEase's
+// romalrc follows the timed lines, not the word-timed ones; its credits
+// and lines far from any sung line are left out.
+func TestAddRomaji(t *testing.T) {
+	yrc := `[57460,3800](57460,400,0)悴(57860,400,0)んだ(58260,400,0)心
+[61340,4000](61340,400,0)世界(61740,400,0)で`
+	lines := Build("", "", yrc)
+	AddRomaji(lines, "[by:someone]\n[00:57.453]ka ji ka n da ko ko ro\n[01:01.336]se ka i de\n[01:30.00]tooi\n")
+	if len(lines) != 2 || lines[0].Romaji != "ka ji ka n da ko ko ro" || lines[1].Romaji != "se ka i de" {
+		t.Errorf("romaji %+v", lines)
+	}
+}
+
 func TestSpreadWords(t *testing.T) {
 	w := SpreadWords("我爱 you all", 0, 10*time.Second)
 	got := []string{}

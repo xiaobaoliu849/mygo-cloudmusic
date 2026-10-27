@@ -10,13 +10,15 @@ import (
 	"unicode/utf8"
 )
 
-// A Line is a line of timed lyrics, with its translation if any, and
-// when each of its words is sung.
+// A Line is a line of timed lyrics, with its translation and romaji if
+// any, and when each of its words is sung.
 type Line struct {
 	At          time.Duration
 	End         time.Duration
 	Text        string
 	Translation string
+	// Romaji is how a line of Japanese is said, in letters (罗马音).
+	Romaji string
 	Words       []Word
 	// Timed says the words carry their own times, as NetEase's word-timed
 	// lyrics give them; else they share the line's time evenly.
@@ -130,9 +132,21 @@ func Build(lrc, translation, yrc string) []Line {
 			lines[i].Words = SpreadWords(lines[i].Text, lines[i].At, end)
 		}
 	}
-	// Translations go to the line nearest their time: word-timed lines
-	// start a little off the timed lines the translation follows.
-	for _, t := range parseLRC(translation) {
+	attach(lines, translation, func(l *Line) *string { return &l.Translation })
+	return lines
+}
+
+// AddRomaji gives lines their romaji, from the timed lines of it NetEase
+// serves (romalrc).
+func AddRomaji(lines []Line, romaji string) {
+	attach(lines, romaji, func(l *Line) *string { return &l.Romaji })
+}
+
+// attach sets what field picks out of each of lines to the timed line of
+// lrc nearest its time: word-timed lines start a little off the timed
+// lines a translation or romaji follows.
+func attach(lines []Line, lrc string, field func(*Line) *string) {
+	for _, t := range parseLRC(lrc) {
 		if t.Text == "" {
 			continue
 		}
@@ -146,11 +160,10 @@ func Build(lrc, translation, yrc string) []Line {
 				best, bestGap = i, gap
 			}
 		}
-		if best >= 0 && lines[best].Translation == "" {
-			lines[best].Translation = t.Text
+		if best >= 0 && *field(&lines[best]) == "" {
+			*field(&lines[best]) = t.Text
 		}
 	}
-	return lines
 }
 
 // mergeLyrics pairs timed lines with their translations, without words'

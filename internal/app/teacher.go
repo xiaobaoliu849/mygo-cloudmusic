@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/audio"
@@ -80,6 +81,9 @@ type teacherState struct {
 	// hushed drops what is left of a response the listener cut short, by
 	// taking over, until the next.
 	hushed bool
+	// drop says the teacher's next response, still to begin, is to be
+	// dropped: its answer to a take beginning, or to a stray sound in one.
+	drop bool
 	// reply is what the teacher says in the response on its way, and
 	// replyCalls how many tools it calls in it.
 	reply      string
@@ -115,6 +119,9 @@ type teacherState struct {
 	// answer; asked says it was answering at the last tick.
 	lastHeard time.Time
 	asked     bool
+	// begun says the response the teacher gives now has begun; retried,
+	// that one asked for and never begun was asked for again.
+	begun, retried bool
 }
 
 // teacherNow is the time, for the teacher's watchdogs; tests swap it.
@@ -129,6 +136,10 @@ const (
 	// it before the app stops waiting: a response asked for that never
 	// comes would keep the microphone shut.
 	stuckAnswering = 15 * time.Second
+	// unbegun is how long a response asked for may take to begin before it
+	// is asked for again, once: the model sometimes lets the asking go by,
+	// and the listener waited out stuckAnswering in silence.
+	unbegun = 4 * time.Second
 	// lateHeard is how long after an answer what the listener said may
 	// still be written down, the answer to it.
 	lateHeard = 2 * time.Second
@@ -337,6 +348,23 @@ func (a *app) teacherEvent(e teacher.Event) {
 		t.spoke = time.Time{}
 	case teacher.Heard:
 		t.hearing = ""
+		if rec := a.lesson.takes.rec; rec != nil && a.strayHeard(e.Text, rec.key) {
+			// A breath or a noise as the listener begins: the take goes on,
+			// and the teacher's answer to it goes, now or as it begins.
+			if t.answering && t.sess != nil {
+				if t.voice != nil {
+					t.voice.Hush()
+				}
+				t.sess.Cancel()
+				t.hushed = true
+			} else {
+				t.drop = true
+			}
+			break
+		}
+		// The listener heard in earnest: what was to be dropped is past,
+		// and the answer to this is not to go with it.
+		t.drop = false
 		if e.Text != "" {
 			u := utterance{text: e.Text}
 			if t.saying {
@@ -359,7 +387,13 @@ func (a *app) teacherEvent(e teacher.Event) {
 		}
 	case teacher.Answering:
 		t.answering, t.hushed, t.err = true, false, ""
+		t.begun, t.retried = true, false
 		t.reply, t.replyCalls = "", 0
+		if t.drop && t.sess != nil {
+			t.drop = false
+			t.sess.Cancel()
+			t.hushed = true
+		}
 		t.answeringSpoke, t.spoke = t.spoke, time.Time{}
 	case teacher.Saying:
 		if t.hushed {
@@ -383,7 +417,7 @@ func (a *app) teacherEvent(e teacher.Event) {
 		t.calls = append(t.calls, c)
 		t.replyCalls++
 	case teacher.Answered:
-		t.answering, t.saying = false, false
+		t.answering, t.saying, t.begun = false, false, false
 		if e.Err != nil {
 			t.err = e.Err.Error()
 		}
@@ -416,6 +450,31 @@ func (a *app) teacherEvent(e teacher.Event) {
 	}
 }
 
+// strayHeard reports whether what the teacher heard in the take of line
+// key is too short to be the line sung, as "To." of a breath or a noise:
+// fewer than three letters, and under half the line's.
+func (a *app) strayHeard(text string, key int) bool {
+	n := letterCount(text)
+	if n >= 3 {
+		return false
+	}
+	if lines, _ := a.pl.Lyrics(); key >= 0 && key < len(lines) {
+		return 2*n < letterCount(lines[key].Text)
+	}
+	return true
+}
+
+// letterCount is how many letters text has, each kana or kanji one.
+func letterCount(text string) int {
+	n := 0
+	for _, r := range text {
+		if unicode.IsLetter(r) {
+			n++
+		}
+	}
+	return n
+}
+
 // promisesToPlay reports whether what the teacher said says it plays
 // something now, as "我再放一遍第二句给你听": not asks whether to, as
 // "要不要我再放一遍？".
@@ -427,7 +486,7 @@ func promisesToPlay(said string) bool {
 	return playPromise.MatchString(said)
 }
 
-var playPromise = regexp.MustCompile("再放|放一遍|放给你|放第|播放|听一遍|再听|来听|先听|听一下|示范|再来一遍|再来一次|来一遍|开始录|录一下|现在你来唱|轮到你")
+var playPromise = regexp.MustCompile("再放|放一遍|放给你|放第|播放|听一遍|再听|来听|先听|听一下|示范|再来一遍|再来一次|来一遍|开始录|录一下|现在你来唱|轮到你|该你唱|该你了")
 
 // playReminder reminds the teacher to call what it said it would play.
 const playReminder = "（系统提醒，不是学生说的：你刚才说要放给学生听或请学生唱，但没有调用工具。现在就调用相应的工具（play_line、loop_line、start_recording 或 play_recording），不要再重复说话。）"
@@ -470,9 +529,15 @@ func (a *app) teacherWatch() {
 	}
 	t.asked = t.answering
 	switch {
+	case t.answering && !t.begun && !t.retried && !t.hushed && now.Sub(t.lastHeard) > unbegun:
+		// Not one the listener cut short: asked again, it would talk over
+		// what they do.
+		t.log.printf("the response did not begin: asking again")
+		t.retried, t.lastHeard = true, now
+		t.sess.Respond()
 	case t.answering && now.Sub(t.lastHeard) > stuckAnswering:
 		t.log.printf("nothing came of the response: listening again")
-		t.answering, t.saying, t.asked = false, false, false
+		t.answering, t.saying, t.asked, t.drop = false, false, false, false
 	case !t.spoke.IsZero() && !t.answering && len(t.calls) == 0 && !t.nudged && now.Sub(t.spoke) > unanswered:
 		t.log.printf("the listener was not answered: asking")
 		t.spoke, t.nudged = time.Time{}, true
@@ -533,16 +598,23 @@ func (a *app) runCalls() {
 			return
 		}
 	}
-	ran := false
+	ran, recording := false, false
 	for _, c := range t.calls {
 		t.sess.Answer(c.ID, c.result)
 		ran = ran || !c.skipped
+		recording = recording || c.Name == "start_recording" && !c.skipped
 	}
 	t.calls = nil
 	// Skipped, the teacher waits for the listener to speak.
 	if ran {
 		t.sess.Respond()
 		t.answering = true
+		// Recording, it waits for them to sing: its answer, as a take
+		// begins, judged the line before it was sung, so it goes. Not
+		// asked for at all, the results unanswered piled up until the
+		// model refused more ("Turn queue overflow"). A take that could
+		// not begin, the teacher is to say so.
+		t.drop = recording && a.lesson.takes.rec != nil
 	}
 }
 
@@ -644,7 +716,7 @@ func (a *app) runTool(c teacher.Call) (any, func() bool) {
 			return toolError("录不了音：" + a.lesson.takes.err), nil
 		}
 		r := lineFor(lines, n)
-		r["recording"] = "学生要清唱这一句了，没有伴奏：简短地告诉他这次是清唱，请他开始，然后安静地听，他唱完停下时录音自动结束"
+		r["recording"] = "录音已开始，学生在清唱：不要说话，安静地听，他唱完停下时录音自动结束"
 		return r, nil
 	case "stop_recording":
 		a.stopRecording()
@@ -729,9 +801,13 @@ func stepLine(lines []lyrics.Line, at, step int) (int, bool) {
 	return at, false
 }
 
-// lineFor is line n for the teacher: its number, words and translation.
+// lineFor is line n for the teacher: its number, words, romaji and
+// translation.
 func lineFor(lines []lyrics.Line, n int) map[string]any {
 	r := map[string]any{"n": lineNumber(lines, n), "text": lines[n].Text}
+	if ro := lines[n].Romaji; ro != "" {
+		r["romaji"] = ro
+	}
 	if tl := lines[n].Translation; tl != "" {
 		r["translation"] = tl
 	}
@@ -773,6 +849,9 @@ func (a *app) teacherInstructions() string {
 			continue
 		}
 		fmt.Fprintf(&b, "%d. %s", lineNumber(lines, n), l.Text)
+		if l.Romaji != "" {
+			fmt.Fprintf(&b, " [%s]", l.Romaji)
+		}
 		if l.Translation != "" {
 			fmt.Fprintf(&b, "（%s）", l.Translation)
 		}
@@ -782,15 +861,17 @@ func (a *app) teacherInstructions() string {
 }
 
 // teacherPrompt is how the teacher teaches.
-const teacherPrompt = `你是一位耐心、温暖的声乐老师，在一个音乐播放器里教学生唱歌，一次教一句。始终用简体中文和学生说话，不管学生说的、唱的是日语、英语还是别的语言（歌词本身照原文念）；每次只说一两句，简短自然。你自己不唱：原曲就是示范，用工具放给学生听。
+const teacherPrompt = `你是一位耐心、温暖的声乐老师，在一个音乐播放器里教学生唱歌，一次教一句。始终用简体中文和学生说话，不管学生说的、唱的是日语、英语还是别的语言（歌词本身照原文念）。你自己不唱：原曲就是示范，用工具放给学生听。
+
+说话要短：每次最多一句话，不超过 20 个字，不寒暄、不客套、不重复学生看得到的东西。开场只说一句，比如"先听第二句"，就开始放。
 
 一句的教法：
 1. 用 play_line 把这一句放给学生听。它播完才返回，返回前不要说话。
-2. 说"现在轮到你来唱，这次是清唱，没有伴奏"，然后调用 start_recording，安静地听学生唱。
-3. 学生唱完后，对照这一句的歌词，指出一两个具体的问题：哪个音发得不准、太短或太长、在哪换气、节奏快了还是慢了；给一个口型、舌位或气息的小建议，再鼓励一下。
-4. 问学生是再来一遍，还是学下一句。再来用 play_line 或 loop_line，下一句先 next_line 再 play_line。
+2. play_line 返回后，什么都不说，直接调用 start_recording（学生屏幕上会显示"跟着唱 · 录音中"），然后安静地听，等学生唱完再说话。
+3. 学生唱完后，只指出最要紧的一个问题，并给一个具体做法，比如"「つづけ」的 tsu 太轻，舌尖顶住上齿再发"；唱得好就说好在哪。不要列一串问题。
+4. 问"再来一遍，还是下一句？"。再来用 play_line 或 loop_line，下一句先 next_line 再 play_line。
 
-学生也可以随时提要求：放慢（slow_down）、听整首（play_song）、听自己唱的（play_recording）。歌词的行号从 1 开始，和学生屏幕上的编号一样。日语歌词可以用假名或罗马音帮学生读准。歌在放的时候你听不到学生说话。
+学生也可以随时提要求：放慢（slow_down）、听整首（play_song）、听自己唱的（play_recording）。歌词的行号从 1 开始，和学生屏幕上的编号一样。日语歌词可以用假名或罗马音帮学生读准；歌词后方括号里的是网易云给的这句的罗马音，有就照它的读法纠正发音。歌在放的时候你听不到学生说话。
 
 说要放、要录，就在同一次回复里调用 play_line、loop_line 或 start_recording，不要只说不做。
 你不会唱歌，不要试着唱：要听唱法，就用 play_line 放原曲，难的句子先用 slow_down 放慢到 0.75。学生要你示范发音时，用日语一个音一个音、慢慢地念，每个音之间停一下，比如「お、も、い、つ、づ、け、て」。`
@@ -816,7 +897,7 @@ var teacherTools = []teacher.Tool{
 	{Name: "highlight_line", Description: "把歌词移到第 n 句并标出来，不放。", Params: lineParams(true)},
 	{Name: "next_line", Description: "移到下一句，返回它的歌词，不放。"},
 	{Name: "previous_line", Description: "移到上一句，返回它的歌词，不放。"},
-	{Name: "start_recording", Description: "开始录学生清唱（没有伴奏）现在这一句（或第 n 句），返回这一句的歌词。调用后简短地请学生开始，然后安静地听；学生唱完停下，录音自动结束。", Params: lineParams(false)},
+	{Name: "start_recording", Description: "开始录学生清唱（没有伴奏）现在这一句（或第 n 句），返回这一句的歌词。调用后不要说话，安静地听；学生唱完停下，录音自动结束。", Params: lineParams(false)},
 	{Name: "stop_recording", Description: "停止录音。"},
 	{Name: "play_recording", Description: "把学生唱的这一句（或第 n 句）放给他听，原曲小声伴着，放完才返回。", Params: lineParams(false)},
 	{Name: "play_vocals", Description: "只放第 n 句（不给 n 就是现在这一句）原唱歌手的人声，去掉伴奏，按 slow_down 的速度、原调，当作你的示范唱给学生听；分离和放完才返回。学生没下载人声分离模型时会返回错误，请他在设置的「跟唱」里下载。", Params: lineParams(false)},

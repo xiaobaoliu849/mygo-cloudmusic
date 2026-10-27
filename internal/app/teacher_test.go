@@ -231,12 +231,27 @@ func TestTeacherCallsWaitForItsVoice(t *testing.T) {
 // kept, not played back, and the teacher can play it.
 func TestTeacherRecordsLine(t *testing.T) {
 	a, _, m, f, _ := teacherApp(t)
+	responded := f.responded
 	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "r", Name: "start_recording"}})
 	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
 	a.teacherTick()
 	r, _ := f.answers["r"].(map[string]any)
 	if a.lesson.takes.rec == nil || r["n"] != 2 {
 		t.Fatalf("recording %v, answered %v", a.lesson.takes.rec != nil, f.answers)
+	}
+	// The teacher is asked to go on as the take begins, or what it is told
+	// piles up until the model refuses more; what it answers goes, as it
+	// judged the line before it was sung.
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Saying, Text: "唱得很好"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	if f.responded != responded+1 || f.cancelled != 1 || a.lesson.takes.rec == nil {
+		t.Fatalf("as the take began: responded %d, cancelled %d, recording %v", f.responded-responded, f.cancelled, a.lesson.takes.rec != nil)
+	}
+	for _, u := range a.teacher.said {
+		if u.teacher && u.text != "" {
+			t.Fatalf("the teacher said %q as the take began", u.text)
+		}
 	}
 	m.sing(2 * time.Second)
 	a.teacherEvent(teacher.Event{Kind: teacher.Heard, Text: "世界で僕は独りぼっちだった"})
@@ -245,7 +260,7 @@ func TestTeacherRecordsLine(t *testing.T) {
 		t.Fatalf("heard to stop: recording %v, kept %d, playing back %v", tk.rec != nil, len(tk.sung[1].samples), tk.out != nil)
 	}
 
-	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
 	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "p", Name: "play_recording"}})
 	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
 	a.teacherTick()
@@ -363,6 +378,31 @@ func TestLessonNumbersSungLines(t *testing.T) {
 	}
 	if _, ok := teacherLine(lines, map[string]any{"n": 3.0}, 0); ok {
 		t.Error("the teacher has a line 3 of 2")
+	}
+}
+
+// A stray sound as the listener begins, heard as "To.", neither ends the
+// take nor is answered: it ended the take, and the teacher judged it as
+// the line.
+func TestTeacherIgnoresStraySound(t *testing.T) {
+	a, _, m, f, _ := teacherApp(t)
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "r", Name: "start_recording"}})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	// Its answer as the take begins goes.
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	f.cancelled = 0
+	m.sing(time.Second)
+	a.teacherEvent(teacher.Event{Kind: teacher.Heard, Text: "To."})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	if a.lesson.takes.rec == nil || f.cancelled != 1 {
+		t.Fatalf("after a stray sound: recording %v, cancelled %d", a.lesson.takes.rec != nil, f.cancelled)
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherEvent(teacher.Event{Kind: teacher.Heard, Text: "世界で僕は独りぼっちだった"})
+	if a.lesson.takes.rec != nil {
+		t.Error("the line sung did not end the take")
 	}
 }
 
@@ -537,6 +577,73 @@ func TestTeacherDoesNotStall(t *testing.T) {
 	wait(stuckAnswering + time.Second)
 	if a.teacher.answering {
 		t.Error("still waiting on a response that went quiet")
+	}
+}
+
+// A response asked for that never begins is asked for again, once, a few
+// seconds on: the model let a reminder go by, and the listener waited
+// 15 seconds in silence.
+func TestTeacherAsksAgainForResponseNotBegun(t *testing.T) {
+	a, _, _, f, _ := teacherApp(t)
+	now := time.Now().Add(time.Minute)
+	old := teacherNow
+	teacherNow = func() time.Time { return now }
+	defer func() { teacherNow = old }()
+	wait := func(d time.Duration) {
+		now = now.Add(d)
+		a.teacherTick()
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Saying, Text: "我放慢了，再听一遍。"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	if f.responded != 1 {
+		t.Fatalf("not reminded: responded %d", f.responded)
+	}
+	wait(time.Second)
+	wait(unbegun + time.Second)
+	if f.responded != 2 {
+		t.Fatalf("not asked again: responded %d", f.responded)
+	}
+	wait(unbegun + time.Second)
+	if f.responded != 2 {
+		t.Errorf("asked more than once: responded %d", f.responded)
+	}
+
+	// One the listener cut short, by taking over, is not asked for again:
+	// it would talk over what they do.
+	wait(stuckAnswering + time.Second)
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Saying, Text: "该你唱了"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	responded := f.responded
+	a.teacherYield()
+	wait(unbegun + time.Second)
+	if f.responded != responded {
+		t.Errorf("asked again after the listener took over: responded %d, then %d", responded, f.responded)
+	}
+}
+
+// The answer to a take beginning, waited for in vain, is not dropped in
+// place of the answer to the line sung: the teacher said nothing of it.
+func TestTeacherDropsNoLaterAnswer(t *testing.T) {
+	a, _, m, _, _ := teacherApp(t)
+	now := time.Now().Add(time.Minute)
+	old := teacherNow
+	teacherNow = func() time.Time { return now }
+	defer func() { teacherNow = old }()
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "r", Name: "start_recording"}})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	// Its answer as the take begins never comes.
+	for range 3 {
+		now = now.Add(stuckAnswering / 2)
+		a.teacherTick()
+	}
+	m.sing(2 * time.Second)
+	a.teacherEvent(teacher.Event{Kind: teacher.Heard, Text: "世界で僕は独りぼっちだった"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	if a.teacher.hushed {
+		t.Error("the answer to the line sung was dropped")
 	}
 }
 

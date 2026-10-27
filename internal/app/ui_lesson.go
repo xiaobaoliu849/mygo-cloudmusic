@@ -99,8 +99,11 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 					ui.Text(c, fmt.Sprint(number)).Width(22).FontSize(12).FontFeatures("tnum").Margin(8, 0, 0, 0).TextColor(white.Alpha(0.3))
 					ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
 						ui.Text(c, l.Text).FontSize(22).FontWeight(700).LineHeight(1.3).TextColor(white.Alpha(alpha))
-						if l.Translation != "" {
-							ui.Text(c, l.Translation).FontSize(13.5).FontWeight(500).TextColor(white.Alpha(alpha * 0.6))
+						if r := a.romaji(l); r != "" {
+							ui.Text(c, r).FontSize(14.5).FontWeight(500).TextColor(white.Alpha(alpha * 0.8))
+						}
+						if tl := a.translation(l); tl != "" {
+							ui.Text(c, tl).FontSize(13.5).FontWeight(500).TextColor(white.Alpha(alpha * 0.6))
 						}
 					})
 				})
@@ -130,6 +133,22 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 		target := lb.Y - box.Y + ls.scroll.Y - box.H*0.3
 		ls.scroll.ScrollTo(0, min(max(0, target), ls.scroll.MaxY), ui.Animation{Spring: ui.SpringOptions{Duration: 500 * time.Millisecond}})
 	}
+}
+
+// romaji is line l's romaji, unless the listener hides it.
+func (a *app) romaji(l lyrics.Line) string {
+	if a.settings.HideRomaji {
+		return ""
+	}
+	return l.Romaji
+}
+
+// translation is line l's translation, unless the listener hides it.
+func (a *app) translation(l lyrics.Line) string {
+	if a.settings.HideTranslation {
+		return ""
+	}
+	return l.Translation
 }
 
 // lineNumber is line n's number as the lesson shows it: the lines sung
@@ -429,7 +448,19 @@ func (a *app) settingsButton(c *ui.Context) {
 				a.settings.save()
 			})
 		})
-		setting("人声对齐", "回放时人声偏晚就按 −", func() {
+		setting("罗马音", "歌词下面标出怎么念", func() {
+			choice(c, "罗马音", []choiceOption{{"开", 1}, {"关", 0}}, boolValue(!a.settings.HideRomaji), func(v float64) {
+				a.settings.HideRomaji = v == 0
+				a.settings.save()
+			})
+		})
+		setting("翻译", "先学发音时可以关掉", func() {
+			choice(c, "翻译", []choiceOption{{"开", 1}, {"关", 0}}, boolValue(!a.settings.HideTranslation), func(v float64) {
+				a.settings.HideTranslation = v == 0
+				a.settings.save()
+			})
+		})
+		setting("人声对齐","回放时人声偏晚就按 −", func() {
 			ui.Row(c).Gap(2).AlignItems(ui.Center).Padding(2).Radius(9).Background(white.Alpha(0.08)).Children(func() {
 				if stepButton(c, "−", "人声早一点").Clicked() {
 					a.nudgeSync(-50 * time.Millisecond)

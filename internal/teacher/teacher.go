@@ -140,11 +140,12 @@ func sessionUpdate(cfg Config) map[string]any {
 			"input_audio_format":        "pcm16",
 			"output_audio_format":       "pcm16",
 			"input_audio_transcription": map[string]any{"model": "qwen3-asr-flash-realtime"},
-			// A singer breathes between phrases: longer than a speaker's
-			// pause before the model takes its turn.
+			// A singer breathes between phrases: a little longer than a
+			// speaker's pause before the model takes its turn, yet short
+			// enough that the teacher answers without a wait.
 			"turn_detection": map[string]any{
 				"type": "server_vad", "threshold": 0.2, "prefix_padding_ms": 300,
-				"silence_duration_ms": 1200, "interrupt_response": false,
+				"silence_duration_ms": 800, "interrupt_response": false,
 			},
 			"tools": tools,
 		},
