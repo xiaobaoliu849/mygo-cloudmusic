@@ -61,6 +61,11 @@ type settings struct {
 	// AutoRecord records the listener as they sing a line along with it,
 	// to play them back once it ends.
 	AutoRecord bool `json:"autoRecord"`
+	// Sync is how many seconds later in the song a take starts than the
+	// player's clock says, for the delay of the speakers and microphone,
+	// which the clock does not know of: found by lining takes up with the
+	// song, or set by ear.
+	Sync float64 `json:"sync"`
 	// CacheMB is how many megabytes the songs kept on disk may take; 0
 	// keeps none.
 	CacheMB int `json:"cacheMB"`

@@ -2,14 +2,22 @@ package app
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/audio"
 	"github.com/egoist/mygo/ui"
 
 	"netease-music-mygo/internal/lyrics"
 	"netease-music-mygo/internal/mic"
+	"netease-music-mygo/internal/player"
 )
 
 // startMic records from the microphone, giving got what it hears.
@@ -21,23 +29,41 @@ var startMic = func(got func([]float32)) (interface{ Stop() }, error) {
 	return r, nil
 }
 
-// takes are the lines the listener sang in a lesson, recorded, for them
-// to hear how they sang: one take a line, the last.
+// throughTake is the key of the take of the song sung through, among
+// those of its lines.
+const throughTake = -1
+
+// takes are what the listener sang in a lesson, recorded, for them to
+// hear how they sang: the last take of each line, and of the song sung
+// through.
 type takes struct {
-	sung map[int][]float32 // by line, mono at mic.Rate
-	want bool              // the listener asked to record the line sung along next
+	sung map[int]*take // by line, or throughTake
+	want bool          // the listener asked to record what is sung along next
 	rec  *recording
 	out  *audio.Player // a take playing back
-	line int           // the line of the take playing back
+	key  int           // the take playing back
 	err  string        // why the last take went wrong, to show
+	// aligning says a take is being lined up with the song, to play it
+	// back once it is.
+	aligning bool
+}
+
+// A take is the listener singing, recorded, and where in the song they
+// sang it from, and at what tempo, to play the song under it as they
+// heard it.
+type take struct {
+	samples []float32 // mono at mic.Rate
+	at      time.Duration
+	tempo   float64
 }
 
 // A recording is a take on its way: the microphone gives it samples on
 // a goroutine of its own.
 type recording struct {
-	line  int
+	key   int
 	limit int // samples to stop at
 	stop  interface{ Stop() }
+	take  *take // its samples come once it ends; where it starts, as it does
 
 	mu      sync.Mutex
 	samples []float32
@@ -52,9 +78,16 @@ func takeLimit(l lyrics.Line, tempo float64) time.Duration {
 	return min(max(d, 4*time.Second), 30*time.Second)
 }
 
+// throughLimit is how long a take of a song length long, sung through
+// from from at tempo, may go on: to its end, but six minutes at most.
+func throughLimit(from, length time.Duration, tempo float64) time.Duration {
+	d := time.Duration(float64(length-from)/tempo) + 5*time.Second
+	return min(max(d, 10*time.Second), 6*time.Minute)
+}
+
 // hookLesson has the player ask the settings how a lesson goes, and tell
-// the app as a line plays for the listener to sing along with it: to
-// record them as they do, and play them back once it ends.
+// the app as the song plays for the listener to sing along with it: to
+// record them as they do, and play them back once it stops.
 func (a *app) hookLesson() {
 	a.pl.Guide = func() float64 { return a.settings.Guide }
 	a.pl.Records = func() bool { return a.settings.AutoRecord }
@@ -68,35 +101,66 @@ func (a *app) hookLesson() {
 		t.want = false
 		n, _ := a.pl.Line()
 		lines, _ := a.pl.Lyrics()
-		if (want || a.settings.AutoRecord) && n >= 0 && n < len(lines) {
-			a.record(n, takeLimit(lines[n], a.pl.Tempo()))
+		if !want && !a.settings.AutoRecord || n < 0 || n >= len(lines) {
+			return
+		}
+		// Where the take starts, until the microphone says: as the song
+		// starts playing for the listener to sing along with it.
+		from := max(0, lines[n].At-player.LineLead)
+		if a.pl.SingingThrough() {
+			a.record(throughTake, throughLimit(lines[n].At, a.pl.Duration(), a.pl.Tempo()), from)
+		} else {
+			a.record(n, takeLimit(lines[n], a.pl.Tempo()), from)
 		}
 	}
 }
 
-// singTake plays line n softly for the listener to sing along with it,
-// recording them.
-func (a *app) singTake(n int) {
+// singTake plays the song softly from line n for the listener to sing
+// along with it, recording them: that line alone, or on from it, sung
+// through.
+func (a *app) singTake(n int, through bool) {
 	t := &a.lesson.takes
 	a.stopTake()
 	t.want = true
-	if !a.pl.SingLine(n) {
+	ok := false
+	if through {
+		ok = a.pl.SingThrough(n)
+	} else {
+		ok = a.pl.SingLine(n)
+	}
+	if !ok {
 		t.want = false
 	}
 }
 
-// record starts recording the listener singing line n, for at most limit,
-// with no take playing: the music plays on, for them to sing along.
-func (a *app) record(n int, limit time.Duration) {
+// record starts recording the take key, sung from from in the song, for
+// at most limit, with no take playing: the music plays on, for the
+// listener to sing along.
+func (a *app) record(key int, limit, from time.Duration) {
 	t := &a.lesson.takes
 	a.stopTake()
 	a.stopRecording()
-	rec := &recording{line: n, limit: int(limit.Seconds() * mic.Rate)}
+	sync := time.Duration(a.settings.Sync * float64(time.Second))
+	tempo := a.pl.Tempo()
+	rec := &recording{key: key, limit: int(limit.Seconds() * mic.Rate), take: &take{at: max(0, from+sync), tempo: tempo}}
 	stop, err := startMic(func(s []float32) {
+		arrived := time.Now()
 		rec.mu.Lock()
 		if rec.full {
 			rec.mu.Unlock()
 			return
+		}
+		if len(rec.samples) == 0 {
+			// The first sound came in as long ago as it lasts, the song
+			// heard then where it plays now, less that long, at tempo:
+			// where the take starts in it.
+			heard := time.Duration(len(s)) * time.Second / mic.Rate
+			a.post(func() {
+				if a.pl.SingingAlong() {
+					ago := time.Since(arrived) + heard
+					rec.take.at = max(0, a.pl.Position()-time.Duration(float64(ago)*tempo)+sync)
+				}
+			})
 		}
 		rec.samples = append(rec.samples, s...)
 		rec.level = mic.Level(s)
@@ -122,7 +186,8 @@ func (a *app) record(n int, limit time.Duration) {
 }
 
 // stopRecording ends the take on its way, keeping it unless too short to
-// be singing, then plays it back, unless the music plays on.
+// be singing, and saving it as a file, then plays it back, unless the
+// music plays on.
 func (a *app) stopRecording() {
 	t := &a.lesson.takes
 	rec := t.rec
@@ -142,35 +207,133 @@ func (a *app) stopRecording() {
 		t.err = "没录到声音：看看系统的声音设置里，默认的麦克风是否正确、没有静音"
 	}
 	if t.sung == nil {
-		t.sung = map[int][]float32{}
+		t.sung = map[int]*take{}
 	}
-	t.sung[rec.line] = samples
-	if !a.pl.Playing() {
-		a.playTake(rec.line)
+	rec.take.samples = samples
+	t.sung[rec.key] = rec.take
+	if a.win != nil {
+		song := ""
+		if tr := a.pl.Current(); tr != nil {
+			song = tr.Name
+		}
+		go saveTake(song, rec.key, samples)
+	}
+	play := func() {
+		if !a.pl.Playing() {
+			a.playTake(rec.key)
+		}
+	}
+	if rec.key == throughTake && rec.take.tempo == 1 && len(samples) >= alignLeast*mic.Rate {
+		a.align(rec.take, play)
+		return
+	}
+	play()
+}
+
+// alignLeast is the fewest seconds of a take sung through that lines up
+// with the song clearly enough to learn the delay from.
+const alignLeast = 30
+
+// alignReach is how far either way of where the clock says a take starts
+// it may line up with the song.
+const alignReach = 1500 * time.Millisecond
+
+// align lines tk up with the song, by where sound comes in, in the voice
+// and in the song's own: where it matches clearly, it moves the take
+// there, and keeps how far, as the delay of the speakers and microphone,
+// for the takes after. Then it calls then.
+func (a *app) align(tk *take, then func()) {
+	t := &a.lesson.takes
+	au, err := a.pl.OpenAudio()
+	if err != nil {
+		then()
+		return
+	}
+	t.aligning = true
+	samples, at := tk.samples, tk.at
+	go func() {
+		defer au.Close()
+		rate, ch := au.SampleRate(), au.Channels()
+		from := at - alignReach
+		pad := 0
+		if from < 0 {
+			pad, from = int(-from.Seconds()*float64(rate)), 0
+		}
+		lag, ok := time.Duration(0), false
+		if au.SetPosition(int64(from.Seconds()*float64(rate))) == nil {
+			n := int((time.Duration(len(samples))*time.Second/mic.Rate + 2*alignReach).Seconds() * float64(rate))
+			song := make([]float32, pad, n)
+			buf := make([]float32, 4096*ch)
+			var err error
+			for len(song) < n && err == nil {
+				var got int
+				got, err = au.Read(buf)
+				for i := 0; i+ch <= got && len(song) < n; i += ch {
+					var v float32
+					for c := range ch {
+						v += buf[i+c]
+					}
+					song = append(song, v/float32(ch))
+				}
+			}
+			// The song may end before the take and reach after it, sung to
+			// its end: Align hears silence past it. Only a song that can no
+			// longer be read, the track changed, matches nothing.
+			if err == nil || err == io.EOF {
+				lag, ok = mic.Align(samples, song, rate, alignReach)
+			}
+		}
+		a.post(func() {
+			t.aligning = false
+			if ok {
+				tk.at = max(0, tk.at+lag)
+				a.settings.Sync = min(max(a.settings.Sync+lag.Seconds(), -alignReach.Seconds()), alignReach.Seconds())
+				a.settings.save()
+			}
+			then()
+		})
+	}()
+}
+
+// nudgeSync moves the takes, and those to come, d later in the song, as
+// the listener hears them line up, playing the one playing again.
+func (a *app) nudgeSync(d time.Duration) {
+	t := &a.lesson.takes
+	a.settings.Sync += d.Seconds()
+	a.settings.save()
+	for _, tk := range t.sung {
+		tk.at = max(0, tk.at+d)
+	}
+	if t.out != nil {
+		a.playTake(t.key)
 	}
 }
 
-// playTake plays back the take of line n, louder if sung quietly, with
-// the music paused.
-func (a *app) playTake(n int) {
+// playTake plays back the take key, louder if sung quietly, with the
+// song under it, softly, from where it was sung.
+func (a *app) playTake(key int) {
 	t := &a.lesson.takes
-	samples, ok := t.sung[n]
+	tk, ok := t.sung[key]
 	if !ok {
 		return
 	}
 	a.stopTake()
-	if a.pl.Playing() {
+	d := time.Duration(len(tk.samples)) * time.Second / mic.Rate
+	if !a.pl.PlayUnder(tk.at, d, tk.tempo) && a.pl.Playing() {
 		a.pl.TogglePlay()
 	}
-	t.out, t.line = audio.NewSound(mic.Rate, 1, mic.Normalize(samples)).Play(), n
+	t.out, t.key = audio.NewSound(mic.Rate, 1, mic.Normalize(tk.samples)).Play(), key
 }
 
-// stopTake stops a take playing back.
+// stopTake stops a take playing back, and the song under it.
 func (a *app) stopTake() {
 	t := &a.lesson.takes
 	if t.out != nil {
 		t.out.Close()
 		t.out = nil
+		if a.pl.PlayingUnder() {
+			a.pl.StopLine()
+		}
 	}
 }
 
@@ -182,70 +345,113 @@ func (a *app) forgetTakes() {
 	a.lesson.takes = takes{}
 }
 
-// takeBar records the listener singing line n, and plays it back: a
-// meter shows the microphone hearing them as they sing.
-func (a *app) takeBar(c *ui.Context, n int) {
+// checkTake ends the take on its way once it is as long as it may be,
+// and lets go of the take played back once it has played.
+func (a *app) checkTake() {
 	t := &a.lesson.takes
-	rec := t.rec
-	if rec != nil && rec.line != n {
-		// Another line was chosen: that take is over.
-		a.stopRecording()
-		rec = nil
+	if rec := t.rec; rec != nil {
+		rec.mu.Lock()
+		full := rec.full
+		rec.mu.Unlock()
+		if full {
+			a.stopRecording()
+		}
 	}
 	if t.out != nil && !t.out.Playing() {
 		t.out.Close()
 		t.out = nil
 	}
-	ui.Row(c).Gap(10).AlignItems(ui.Center).Padding(4, 0, 0, 8).Children(func() {
-		if rec != nil {
-			rec.mu.Lock()
-			level, got, full := rec.level, len(rec.samples), rec.full
-			rec.mu.Unlock()
-			if full {
-				a.stopRecording()
-			}
-			stop := pillButton(c.Key("stop-take"), nil, "停止录音", ui.Hex("#e5484d"), white).Label("停止录音")
-			if stop.Clicked() {
-				// Pausing the line sung along stops the take, which plays
-				// back.
-				if a.pl.SingingAlong() {
-					a.pl.StopLine()
-				} else {
-					a.stopRecording()
-				}
-			}
-			// The meter: how loud the microphone hears the listener.
-			ui.Box(c).Width(120).Height(6).Radius(3).Background(white.Alpha(0.15)).Children(func() {
-				ui.Box(c).Width(120 * level).Height(6).Radius(3).Background(ui.Hex("#46a758"))
-			})
-			ui.Text(c, fmt.Sprintf("%.1f 秒", float64(got)/mic.Rate)).FontSize(12.5).FontFeatures("tnum").TextColor(white.Alpha(0.6))
-			c.After(50 * time.Millisecond)
-			return
-		}
-		start := pillButton(c.Key("record"), iconPodcast, "录我唱的", white.Alpha(0.14), white).Label("录我唱的")
-		if start.Clicked() {
-			a.singTake(n)
-		}
-		if samples, ok := t.sung[n]; ok {
-			playing := t.out != nil && t.line == n
-			label := fmt.Sprintf("听我唱的 %.1f 秒", float64(len(samples))/mic.Rate)
-			if playing {
-				label = "停止"
-			}
-			b := pillButton(c.Key("play-take"), iconPlay, label, white.Alpha(0.14), white).Label("听我唱的")
-			if b.Clicked() {
-				if playing {
-					a.stopTake()
-				} else {
-					a.playTake(n)
-				}
-			}
-			if playing {
-				c.After(100 * time.Millisecond)
-			}
-		}
-		if t.err != "" {
-			ui.Text(c, t.err).FontSize(12.5).FontWeight(600).TextColor(ui.Hex("#f5a524")).Shrink(1).MinWidth(0)
-		}
+}
+
+// takeButton plays back the take key, if there is one, saying how long
+// it is: or stops it, playing.
+func (a *app) takeButton(c *ui.Context, key int) {
+	t := &a.lesson.takes
+	tk, ok := t.sung[key]
+	if !ok || t.rec != nil {
+		return
+	}
+	playing := t.out != nil && t.key == key
+	icon := iconPlay
+	if playing {
+		icon = iconPause
+	}
+	b := ui.ButtonBase(c.Key("play-take")).Height(32).PaddingX(12).Gap(6).Radius(999).AlignItems(ui.Center).FocusRing(false).
+		Label("听我唱的").Tooltip("听我唱的，原曲小声伴着")
+	bg := white.Alpha(0.1)
+	if playing {
+		bg = white.Alpha(0.2)
+	} else if b.Hovered() {
+		bg = white.Alpha(0.16)
+	}
+	b.Background(b.AnimateColor("bg", bg, ui.Animation{Duration: 150 * time.Millisecond}))
+	b.Children(func() {
+		ui.Icon(c, icon).Size(11, 11).TextColor(white)
+		ui.Text(c, clock(time.Duration(len(tk.samples))*time.Second/mic.Rate)).FontSize(12.5).FontWeight(600).FontFeatures("tnum").TextColor(white)
 	})
+	if b.Clicked() {
+		if playing {
+			a.stopTake()
+		} else {
+			a.playTake(key)
+		}
+	}
+}
+
+// takesDir is where takes are kept as WAV files.
+func takesDir() (string, error) {
+	dir, err := mygo.App.Path(mygo.PathUserData)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "takes"), nil
+}
+
+// saveTake keeps a take of song as a WAV file, named for when it was sung,
+// the song, and the line, or 整首 for the song sung through.
+func saveTake(song string, key int, samples []float32) {
+	dir, err := takesDir()
+	if err != nil || os.MkdirAll(dir, 0o755) != nil {
+		return
+	}
+	part := "整首"
+	if key != throughTake {
+		part = fmt.Sprintf("第%d句", key+1)
+	}
+	name := fmt.Sprintf("%s %s %s.wav", time.Now().Format("2006-01-02 150405"), fileSafe(song), part)
+	f, err := os.Create(filepath.Join(dir, name))
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	mic.WriteWAV(f, samples)
+}
+
+// fileSafe is name without what a file's name cannot hold.
+func fileSafe(name string) string {
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`\/:*?"<>|`, r) || r < ' ' {
+			return '_'
+		}
+		return r
+	}, name)
+}
+
+// openTakesFolder shows the folder of takes in the system's file browser.
+func openTakesFolder() error {
+	dir, err := takesDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	name := "xdg-open"
+	switch runtime.GOOS {
+	case "windows":
+		name = "explorer"
+	case "darwin":
+		name = "open"
+	}
+	return exec.Command(name, dir).Start()
 }
