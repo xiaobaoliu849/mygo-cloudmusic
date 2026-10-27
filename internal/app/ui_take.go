@@ -220,7 +220,12 @@ func (a *app) stopRecording() {
 		if tr := a.pl.Current(); tr != nil {
 			song = tr.Name
 		}
-		go saveTake(song, rec.key, samples)
+		part := "整首"
+		if rec.key != throughTake {
+			lines, _ := a.pl.Lyrics()
+			part = fmt.Sprintf("第%d句", lineNumber(lines, rec.key))
+		}
+		go saveTake(song, part, samples)
 	}
 	play := func() {
 		// The teacher plays it back if it wants to.
@@ -421,15 +426,12 @@ func takesDir() (string, error) {
 }
 
 // saveTake keeps a take of song as a WAV file, named for when it was sung,
-// the song, and the line, or 整首 for the song sung through.
-func saveTake(song string, key int, samples []float32) {
+// the song, and the part of it sung: the line, or 整首 for the song sung
+// through.
+func saveTake(song, part string, samples []float32) {
 	dir, err := takesDir()
 	if err != nil || os.MkdirAll(dir, 0o755) != nil {
 		return
-	}
-	part := "整首"
-	if key != throughTake {
-		part = fmt.Sprintf("第%d句", key+1)
 	}
 	name := fmt.Sprintf("%s %s %s.wav", time.Now().Format("2006-01-02 150405"), fileSafe(song), part)
 	f, err := os.Create(filepath.Join(dir, name))

@@ -230,7 +230,7 @@ func (a *app) teacherHello() string {
 	if len(lines) == 0 {
 		return "（学生刚打开 AI 老师，还没有放有歌词的歌。简短地打个招呼，请他先放一首。）"
 	}
-	return fmt.Sprintf("（学生刚打开 AI 老师，歌词停在第 %d 句。简短地打个招呼，然后开始教这一句。）", a.lessonAt(lines)+1)
+	return fmt.Sprintf("（学生刚打开 AI 老师，歌词停在第 %d 句。简短地打个招呼，然后开始教这一句。）", lineNumber(lines, a.lessonAt(lines)))
 }
 
 // teacherTicks has the app look in on the teacher ten times a second,
@@ -501,7 +501,7 @@ func (a *app) runTool(c teacher.Call) (any, func() bool) {
 			return toolError(fmt.Sprintf("没有第 %v 句", c.Args["n"])), nil
 		}
 		if _, sung := a.lesson.takes.sung[n]; !sung {
-			return toolError(fmt.Sprintf("第 %d 句还没有录音", n+1)), nil
+			return toolError(fmt.Sprintf("第 %d 句还没有录音", lineNumber(lines, n))), nil
 		}
 		a.playTake(n)
 		r := lineFor(lines, n)
@@ -512,7 +512,8 @@ func (a *app) runTool(c teacher.Call) (any, func() bool) {
 }
 
 // lessonAt is the line the lesson is at: the one the teacher points to,
-// else the one chosen, else the one sung now.
+// else the one chosen, else the one sung now, or the first sung after it
+// for one of the credits, as at the song's start.
 func (a *app) lessonAt(lines []lyrics.Line) int {
 	if p := a.lesson.pointed; p > 0 && p <= len(lines) {
 		return p - 1
@@ -520,18 +521,21 @@ func (a *app) lessonAt(lines []lyrics.Line) int {
 	if n, _ := a.pl.Line(); n >= 0 {
 		return n
 	}
-	return max(0, lyrics.Index(lines, a.pl.Position()))
+	n := max(0, lyrics.Index(lines, a.pl.Position()))
+	if n < len(lines) && lyrics.IsCredit(lines[n].Text) {
+		n, _ = stepLine(lines, n, 1)
+	}
+	return n
 }
 
-// teacherLine is the line the teacher's args name, numbered from 1 as the
-// lesson shows them, else at, reporting false for no such line or one of
-// the credits, which are not sung.
+// teacherLine is the line the teacher's args name, numbered as the lesson
+// shows them, else at, reporting false for no such line or one of the
+// credits, which are not sung.
 func teacherLine(lines []lyrics.Line, args map[string]any, at int) (int, bool) {
-	n := at
 	if v, ok := args["n"].(float64); ok {
-		n = int(v) - 1
+		return numberedLine(lines, int(v))
 	}
-	return n, n >= 0 && n < len(lines) && !lyrics.IsCredit(lines[n].Text)
+	return at, at >= 0 && at < len(lines) && !lyrics.IsCredit(lines[at].Text)
 }
 
 // stepLine is the line sung next after at, step 1, or before it, step -1.
@@ -546,7 +550,7 @@ func stepLine(lines []lyrics.Line, at, step int) (int, bool) {
 
 // lineFor is line n for the teacher: its number, words and translation.
 func lineFor(lines []lyrics.Line, n int) map[string]any {
-	r := map[string]any{"n": n + 1, "text": lines[n].Text}
+	r := map[string]any{"n": lineNumber(lines, n), "text": lines[n].Text}
 	if tl := lines[n].Translation; tl != "" {
 		r["translation"] = tl
 	}
@@ -584,7 +588,7 @@ func (a *app) teacherInstructions() string {
 		if lyrics.IsCredit(l.Text) {
 			continue
 		}
-		fmt.Fprintf(&b, "%d. %s", n+1, l.Text)
+		fmt.Fprintf(&b, "%d. %s", lineNumber(lines, n), l.Text)
 		if l.Translation != "" {
 			fmt.Fprintf(&b, "（%s）", l.Translation)
 		}

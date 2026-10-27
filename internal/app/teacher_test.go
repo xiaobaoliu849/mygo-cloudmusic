@@ -7,6 +7,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 
+	"netease-music-mygo/internal/lyrics"
 	"netease-music-mygo/internal/teacher"
 )
 
@@ -290,5 +291,49 @@ func TestTeacherYields(t *testing.T) {
 	}
 	if said := a.teacher.said; said[len(said)-1].text != "我们先来听第二句" {
 		t.Errorf("said %q", said[len(said)-1].text)
+	}
+}
+
+// The lesson numbers the lines sung from 1, leaving out the credits, as
+// it leaves them out of its list, and the teacher goes by the same
+// numbers. They were numbered by their place among all the lines: after
+// 作词, 作曲 and 编曲, the first line sung was 4. The line before the first
+// sung is none, not one of the credits.
+func TestLessonNumbersSungLines(t *testing.T) {
+	a, tt, _ := takeApp(t)
+	a.pl.SetLyrics([]lyrics.Line{
+		{At: 0, End: time.Second, Text: "作词 : SoulJa/青山テルマ"},
+		{At: time.Second, End: 2 * time.Second, Text: "作曲 : SoulJa"},
+		{At: 2 * time.Second, End: 3 * time.Second, Text: "编曲 : Hiroshi Sato"},
+		{At: 10 * time.Second, End: 13 * time.Second, Text: "あなたのこと私は今でも"},
+		{At: 13 * time.Second, End: 17 * time.Second, Text: "思い続けているよ"},
+	})
+	tt.Frame()
+	if err := tt.Click("あなたのこと私は今でも"); err != nil {
+		t.Fatal(err)
+	}
+	a.pl.StopLine()
+	tt.Frame()
+	texts := " " + strings.Join(tt.Texts(), " ") + " "
+	if !strings.Contains(texts, " 1 ") || !strings.Contains(texts, " 2 ") || strings.Contains(texts, " 4 ") || !strings.Contains(texts, "第 1 句") {
+		t.Errorf("numbered the lines %s", texts)
+	}
+
+	tt.Click("上一句")
+	tt.Frame()
+	if n, _ := a.pl.Line(); n != 3 {
+		t.Errorf("the line before the first sung went to line %d", n)
+	}
+
+	lines, _ := a.pl.Lyrics()
+	told := a.teacherInstructions()
+	if !strings.Contains(told, "1. あなたのこと私は今でも") || !strings.Contains(told, "2. 思い続けているよ") || strings.Contains(told, "4. あなたのこと") {
+		t.Errorf("told the teacher %s", told)
+	}
+	if n, ok := teacherLine(lines, map[string]any{"n": 1.0}, 0); !ok || n != 3 || lineFor(lines, n)["n"] != 1 {
+		t.Errorf("the teacher's line 1 is line %d, numbered %v", n, lineFor(lines, n)["n"])
+	}
+	if _, ok := teacherLine(lines, map[string]any{"n": 3.0}, 0); ok {
+		t.Error("the teacher has a line 3 of 2")
 	}
 }

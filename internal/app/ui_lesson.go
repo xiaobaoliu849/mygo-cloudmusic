@@ -73,10 +73,13 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 	var active ui.Element
 	scroll.Children(func() {
 		ui.Column(c).Gap(2).Children(func() {
+			num := 0 // the lines sung so far: the credits are not numbered
 			for i, l := range lines {
 				if lyrics.IsCredit(l.Text) {
 					continue
 				}
+				num++
+				number := num
 				row := ui.ButtonBase(c.Key(i)).Gap(12).Padding(10, 14).Radius(14).AlignItems(ui.Start).FocusRing(false).Label(l.Text)
 				bg := ui.Transparent
 				switch {
@@ -93,7 +96,7 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 					alpha = 0.6
 				}
 				row.Children(func() {
-					ui.Text(c, fmt.Sprint(i+1)).Width(22).FontSize(12).FontFeatures("tnum").Margin(8, 0, 0, 0).TextColor(white.Alpha(0.3))
+					ui.Text(c, fmt.Sprint(number)).Width(22).FontSize(12).FontFeatures("tnum").Margin(8, 0, 0, 0).TextColor(white.Alpha(0.3))
 					ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
 						ui.Text(c, l.Text).FontSize(22).FontWeight(700).LineHeight(1.3).TextColor(white.Alpha(alpha))
 						if l.Translation != "" {
@@ -113,7 +116,7 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 
 	a.teacherPanel(c)
 	a.lessonStatus(c, at, sung)
-	a.lessonDock(c, at, len(lines))
+	a.lessonDock(c, lines, at)
 
 	// Bring the line in focus into view, a third of the way down, once it
 	// changes.
@@ -127,6 +130,36 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 		target := lb.Y - box.Y + ls.scroll.Y - box.H*0.3
 		ls.scroll.ScrollTo(0, min(max(0, target), ls.scroll.MaxY), ui.Animation{Spring: ui.SpringOptions{Duration: 500 * time.Millisecond}})
 	}
+}
+
+// lineNumber is line n's number as the lesson shows it: the lines sung
+// counted from 1, the credits, as 作词, left out, as the lesson leaves
+// them out; 0 for one of the credits.
+func lineNumber(lines []lyrics.Line, n int) int {
+	if n < 0 || n >= len(lines) || lyrics.IsCredit(lines[n].Text) {
+		return 0
+	}
+	num := 0
+	for _, l := range lines[:n+1] {
+		if !lyrics.IsCredit(l.Text) {
+			num++
+		}
+	}
+	return num
+}
+
+// numberedLine is the line numbered num, as lineNumber numbers them,
+// reporting false for none.
+func numberedLine(lines []lyrics.Line, num int) (int, bool) {
+	for n, l := range lines {
+		if lyrics.IsCredit(l.Text) {
+			continue
+		}
+		if num--; num == 0 {
+			return n, true
+		}
+	}
+	return 0, false
 }
 
 // startLesson starts from line n: a line at a time, it plays the line to
@@ -182,9 +215,10 @@ func (a *app) lessonStatus(c *ui.Context, at, sung int) {
 	pl := a.pl
 	t := &a.lesson.takes
 	chosen, alone := pl.Line()
-	line := fmt.Sprintf("第 %d 句", at+1)
+	lines, _ := pl.Lyrics()
+	line := fmt.Sprintf("第 %d 句", lineNumber(lines, at))
 	if pl.SingingThrough() {
-		line = fmt.Sprintf("第 %d 句", max(0, sung)+1)
+		line = fmt.Sprintf("第 %d 句", lineNumber(lines, max(at, sung)))
 	}
 	text, color := "", white.Alpha(0.55)
 	switch {
@@ -217,7 +251,7 @@ func (a *app) lessonStatus(c *ui.Context, at, sung int) {
 // at its left, the button that starts and stops in the middle, between
 // the line before and after, and what was sung, and the settings, at its
 // right.
-func (a *app) lessonDock(c *ui.Context, at, count int) {
+func (a *app) lessonDock(c *ui.Context, lines []lyrics.Line, at int) {
 	ls := &a.lesson
 	ui.Row(c.Key("dock")).Height(76).AlignItems(ui.Center).Padding(0, 8, 8, 8).Children(func() {
 		ui.Row(c).Grow(1).Basis(0).MinWidth(0).Gap(8).AlignItems(ui.Center).Children(func() {
@@ -232,14 +266,19 @@ func (a *app) lessonDock(c *ui.Context, at, count int) {
 		})
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 			if !ls.through {
+				// The line sung before, or after: not one of the credits.
 				if iconButton(c.Key("prev-line"), iconBack, 18, white.Alpha(0.75), "上一句").Tooltip("上一句").Clicked() {
-					a.startLesson(max(0, at-1), false)
+					if n, ok := stepLine(lines, at, -1); ok {
+						a.startLesson(n, false)
+					}
 				}
 			}
 			a.bigButton(c, at)
 			if !ls.through {
-				if iconButton(c.Key("next-line"), iconForward, 18, white.Alpha(0.75), "下一句").Tooltip("下一句").Clicked() && at+1 < count {
-					a.startLesson(at+1, false)
+				if iconButton(c.Key("next-line"), iconForward, 18, white.Alpha(0.75), "下一句").Tooltip("下一句").Clicked() {
+					if n, ok := stepLine(lines, at, 1); ok {
+						a.startLesson(n, false)
+					}
 				}
 			}
 		})
@@ -279,7 +318,8 @@ func (a *app) bigButton(c *ui.Context, at int) {
 	case busy:
 		label, tip = "停止", "停止"
 	case a.lesson.through:
-		tip = fmt.Sprintf("从第 %d 句一直唱下去", at+1)
+		lines, _ := a.pl.Lyrics()
+		tip = fmt.Sprintf("从第 %d 句一直唱下去", lineNumber(lines, at))
 	case chosen == at:
 		tip = "再唱一遍这一句"
 	}
