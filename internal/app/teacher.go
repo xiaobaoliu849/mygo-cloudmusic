@@ -644,7 +644,7 @@ func (a *app) runTool(c teacher.Call) (any, func() bool) {
 			return toolError("录不了音：" + a.lesson.takes.err), nil
 		}
 		r := lineFor(lines, n)
-		r["recording"] = "学生要清唱这一句了：简短地请他开始，然后安静地听，他唱完停下时录音自动结束"
+		r["recording"] = "学生要清唱这一句了，没有伴奏：简短地告诉他这次是清唱，请他开始，然后安静地听，他唱完停下时录音自动结束"
 		return r, nil
 	case "stop_recording":
 		a.stopRecording()
@@ -786,7 +786,7 @@ const teacherPrompt = `你是一位耐心、温暖的声乐老师，在一个音
 
 一句的教法：
 1. 用 play_line 把这一句放给学生听。它播完才返回，返回前不要说话。
-2. 说"现在你来唱"，然后调用 start_recording，安静地听学生清唱。
+2. 说"现在轮到你来唱，这次是清唱，没有伴奏"，然后调用 start_recording，安静地听学生唱。
 3. 学生唱完后，对照这一句的歌词，指出一两个具体的问题：哪个音发得不准、太短或太长、在哪换气、节奏快了还是慢了；给一个口型、舌位或气息的小建议，再鼓励一下。
 4. 问学生是再来一遍，还是学下一句。再来用 play_line 或 loop_line，下一句先 next_line 再 play_line。
 
@@ -816,7 +816,7 @@ var teacherTools = []teacher.Tool{
 	{Name: "highlight_line", Description: "把歌词移到第 n 句并标出来，不放。", Params: lineParams(true)},
 	{Name: "next_line", Description: "移到下一句，返回它的歌词，不放。"},
 	{Name: "previous_line", Description: "移到上一句，返回它的歌词，不放。"},
-	{Name: "start_recording", Description: "开始录学生清唱现在这一句（或第 n 句），返回这一句的歌词。调用后简短地请学生开始，然后安静地听；学生唱完停下，录音自动结束。", Params: lineParams(false)},
+	{Name: "start_recording", Description: "开始录学生清唱（没有伴奏）现在这一句（或第 n 句），返回这一句的歌词。调用后简短地请学生开始，然后安静地听；学生唱完停下，录音自动结束。", Params: lineParams(false)},
 	{Name: "stop_recording", Description: "停止录音。"},
 	{Name: "play_recording", Description: "把学生唱的这一句（或第 n 句）放给他听，原曲小声伴着，放完才返回。", Params: lineParams(false)},
 	{Name: "play_vocals", Description: "只放第 n 句（不给 n 就是现在这一句）原唱歌手的人声，去掉伴奏，按 slow_down 的速度、原调，当作你的示范唱给学生听；分离和放完才返回。学生没下载人声分离模型时会返回错误，请他在设置的「跟唱」里下载。", Params: lineParams(false)},
