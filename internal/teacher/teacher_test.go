@@ -111,6 +111,7 @@ func TestSession(t *testing.T) {
 	f.send <- map[string]any{"type": "response.function_call_arguments.done", "call_id": "c1", "name": "play_line", "arguments": `{"n":3}`}
 	f.send <- map[string]any{"type": "response.done"}
 	f.send <- map[string]any{"code": "AccessDenied", "message": "Access denied"}
+	f.send <- map[string]any{"type": "response.done", "response": map[string]any{"status": "failed", "status_details": map[string]any{"error": map[string]any{"code": "InternalError", "message": "busy"}}}}
 	if e := events(t, ch); e.Kind != Ready {
 		t.Errorf("first %v", e)
 	}
@@ -129,11 +130,15 @@ func TestSession(t *testing.T) {
 	if e := events(t, ch); e.Kind != Calling || e.Call.ID != "c1" || e.Call.Name != "play_line" || e.Call.Args["n"] != 3.0 {
 		t.Errorf("call %+v", e)
 	}
-	if e := events(t, ch); e.Kind != Answered {
+	if e := events(t, ch); e.Kind != Answered || e.Err != nil {
 		t.Errorf("done %+v", e)
 	}
 	if e := events(t, ch); e.Kind != Failed || !strings.Contains(e.Err.Error(), "AccessDenied") {
 		t.Errorf("an untyped error came as %+v", e)
+	}
+	// A response that failed said nothing, and comes with why.
+	if e := events(t, ch); e.Kind != Answered || e.Err == nil || !strings.Contains(e.Err.Error(), "busy") {
+		t.Errorf("a failed response came as %+v", e)
 	}
 
 	s.Answer("c1", map[string]any{"line": 3})

@@ -454,3 +454,100 @@ func TestTakeErrorClears(t *testing.T) {
 		t.Errorf("still telling %q", a.lesson.takes.err)
 	}
 }
+
+// The listener heard and not answered, as they were ("Play.", and the
+// teacher said nothing, the microphone open), is answered: the teacher is
+// asked to, once, if it has not started to by unanswered; and a response
+// that never comes is waited for no more, the microphone opening again.
+func TestTeacherDoesNotStall(t *testing.T) {
+	a, _, _, f, _ := teacherApp(t)
+	// A while after the teacher greeted the listener.
+	now := time.Now().Add(time.Minute)
+	old := teacherNow
+	teacherNow = func() time.Time { return now }
+	defer func() { teacherNow = old }()
+	wait := func(d time.Duration) {
+		now = now.Add(d)
+		a.teacherTick()
+	}
+
+	a.teacherEvent(teacher.Event{Kind: teacher.Heard, Text: "Play."})
+	wait(time.Second)
+	if f.responded != 0 {
+		t.Fatal("asked to answer at once")
+	}
+	wait(unanswered)
+	if f.responded != 1 || !a.teacher.answering {
+		t.Fatalf("not asked to answer: responded %d", f.responded)
+	}
+	// It answers nothing: it is asked no more, the listener having said
+	// nothing since.
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	wait(unanswered + time.Second)
+	if f.responded != 1 {
+		t.Errorf("asked again: responded %d", f.responded)
+	}
+	// Answering the listener, of itself, with nothing, it is asked at
+	// once; what they said written down only after, it is not.
+	wait(time.Minute)
+	a.teacherEvent(teacher.Event{Kind: teacher.Heard, Text: "下一句"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	wait(100 * time.Millisecond)
+	if f.responded != 2 {
+		t.Errorf("not asked after answering nothing: responded %d", f.responded)
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Saying, Text: "好，下一句。"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "c", Name: "next_line"}})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherEvent(teacher.Event{Kind: teacher.Heard, Text: "好的"})
+	a.teacherTick() // runs the call, and asks the teacher to go on
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Saying, Text: "这一句是……"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	responded := f.responded
+	wait(unanswered + time.Second)
+	if f.responded != responded {
+		t.Errorf("asked about what was written down late: responded %d, then %d", responded, f.responded)
+	}
+
+	// Speaking on after a pause, the listener is not answered over.
+	wait(time.Minute)
+	responded = f.responded
+	a.teacherEvent(teacher.Event{Kind: teacher.Heard, Text: "我觉得"})
+	wait(time.Second)
+	a.teacherEvent(teacher.Event{Kind: teacher.Hearing, Text: "这一句"})
+	wait(unanswered + time.Second)
+	if f.responded != responded {
+		t.Errorf("asked to answer while the listener spoke on: responded %d, then %d", responded, f.responded)
+	}
+
+	// Answered in time, it is not asked.
+	wait(time.Minute)
+	responded = f.responded
+	a.teacherEvent(teacher.Event{Kind: teacher.Heard, Text: "再来一遍"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	wait(unanswered + time.Second)
+	if f.responded != responded {
+		t.Errorf("asked while answering: responded %d, then %d", responded, f.responded)
+	}
+	// Its response goes quiet halfway: the app stops waiting for it.
+	wait(stuckAnswering + time.Second)
+	if a.teacher.answering {
+		t.Error("still waiting on a response that went quiet")
+	}
+}
+
+// A promise to sing the line again, as "好，我们再来一遍第7句。", with
+// nothing called, is reminded to call it: it was not, and nothing played.
+func TestTeacherRemindedToSingAgain(t *testing.T) {
+	a, _, _, f, _ := teacherApp(t)
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Saying, Text: "好，我们再来一遍第7句。"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	if len(f.told) != 2 || f.responded != 1 {
+		t.Errorf("not reminded: told %q, responded %d", f.told, f.responded)
+	}
+}

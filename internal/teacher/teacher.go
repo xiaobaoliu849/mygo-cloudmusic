@@ -62,7 +62,7 @@ type Event struct {
 	Text  string    // Hearing, Heard, Saying
 	Audio []float32 // Speech: mono at OutRate
 	Call  Call      // Calling
-	Err   error     // Failed, Closed
+	Err   error     // Failed, Closed, Answered
 }
 
 // Kind is what an Event is.
@@ -76,7 +76,7 @@ const (
 	Speech                // more of the model's voice, Audio
 	Answering             // the model starts to respond
 	Calling               // the model calls a tool, Call
-	Answered              // the model's response is done
+	Answered              // the model's response is done, with Err if it failed
 	Failed                // the model reports an error, Err; the session goes on
 	Closed                // the session ended, with Err unless asked to
 )
@@ -249,8 +249,9 @@ func parse(raw json.RawMessage) (Event, bool) {
 			Message string `json:"message"`
 		} `json:"error"`
 		// An error may come with no type, and these at the top.
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code     string `json:"code"`
+		Message  string `json:"message"`
+		Response *responseStatus `json:"response"`
 	}
 	if json.Unmarshal(raw, &m) != nil {
 		return Event{}, false
@@ -281,7 +282,7 @@ func parse(raw json.RawMessage) (Event, bool) {
 	case "response.created":
 		return Event{Kind: Answering}, true
 	case "response.done":
-		return Event{Kind: Answered}, true
+		return Event{Kind: Answered, Err: responseErr(m.Response)}, true
 	case "error", "":
 		code, msg := m.Code, m.Message
 		if m.Error != nil {
@@ -296,4 +297,35 @@ func parse(raw json.RawMessage) (Event, bool) {
 		return Event{Kind: Failed, Err: fmt.Errorf("teacher: %s: %s", code, msg)}, true
 	}
 	return Event{}, false
+}
+
+// responseStatus is how a response ended, as response.done says.
+type responseStatus struct {
+	Status        string `json:"status"`
+	StatusDetails *struct {
+		Reason string `json:"reason"`
+		Error  *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	} `json:"status_details"`
+}
+
+// responseErr is why a response did not complete: one that failed, or
+// stopped short, said nothing; nil for one that completed or was
+// cancelled, as asked.
+func responseErr(r *responseStatus) error {
+	if r == nil || r.Status == "" || r.Status == "completed" || r.Status == "cancelled" {
+		return nil
+	}
+	why := r.Status
+	if d := r.StatusDetails; d != nil {
+		switch {
+		case d.Error != nil:
+			why += ": " + strings.TrimPrefix(d.Error.Code+": "+d.Error.Message, ": ")
+		case d.Reason != "":
+			why += ": " + d.Reason
+		}
+	}
+	return fmt.Errorf("teacher: the response %s", why)
 }

@@ -2,6 +2,7 @@ package app
 
 import (
 	"cmp"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -100,7 +101,38 @@ type teacherState struct {
 	// the bits of a float32: 0 while it does not hear.
 	level *atomic.Uint32
 	quit  chan struct{}
+
+	log *teacherLog // nil without a window, as in tests
+	// spoke is when the listener was heard last, unanswered so far, and
+	// nudged says the teacher was asked once since to answer them.
+	spoke  time.Time
+	nudged bool
+	// answeringSpoke is when the listener spoke whom the teacher answers
+	// now, zero for a response the app asked for, and answeredAt when it
+	// last finished answering.
+	answeringSpoke, answeredAt time.Time
+	// lastHeard is when the teacher last sent anything, or was asked to
+	// answer; asked says it was answering at the last tick.
+	lastHeard time.Time
+	asked     bool
 }
+
+// teacherNow is the time, for the teacher's watchdogs; tests swap it.
+var teacherNow = time.Now
+
+const (
+	// unanswered is how long the teacher may take to start answering the
+	// listener before it is asked to: turn detection sometimes hears them,
+	// writes them down and answers nothing, and they wait on in silence.
+	unanswered = 4 * time.Second
+	// stuckAnswering is how long the teacher may answer with nothing from
+	// it before the app stops waiting: a response asked for that never
+	// comes would keep the microphone shut.
+	stuckAnswering = 15 * time.Second
+	// lateHeard is how long after an answer what the listener said may
+	// still be written down, the answer to it.
+	lateHeard = 2 * time.Second
+)
 
 // An utterance is something the teacher or the listener said.
 type utterance struct {
@@ -210,6 +242,10 @@ func (a *app) teacherDialed(gen int, s teacherSession, err error) {
 		t.on, t.err = false, "连不上 AI 老师："+err.Error()
 		return
 	}
+	if a.win != nil {
+		t.log = openTeacherLog()
+		s = loggedSession{s, t.log}
+	}
 	t.sess = s
 	t.voice = teacher.NewVoice()
 	t.out = audio.NewPlayer(t.voice)
@@ -285,15 +321,20 @@ func (a *app) stopTeacher() {
 	if t.out != nil {
 		t.out.Close()
 	}
+	t.log.close()
 	*t = teacherState{gen: t.gen + 1, said: t.said, err: t.err}
 }
 
 // teacherEvent hears what the teacher sends.
 func (a *app) teacherEvent(e teacher.Event) {
 	t := &a.teacher
+	t.lastHeard = teacherNow()
+	a.logTeacherEvent(e)
 	switch e.Kind {
 	case teacher.Hearing:
 		t.hearing = e.Text
+		// The listener speaks on: not to be answered before they finish.
+		t.spoke = time.Time{}
 	case teacher.Heard:
 		t.hearing = ""
 		if e.Text != "" {
@@ -307,6 +348,11 @@ func (a *app) teacherEvent(e teacher.Event) {
 			}
 		}
 		t.reminded = false
+		// Written down only after an answer to it, as happens, it was
+		// answered.
+		if e.Text != "" && !t.answering && teacherNow().Sub(t.answeredAt) > lateHeard {
+			t.spoke, t.nudged = teacherNow(), false
+		}
 		// The listener stopped singing: the take of it ends.
 		if a.lesson.takes.rec != nil {
 			a.stopRecording()
@@ -314,6 +360,7 @@ func (a *app) teacherEvent(e teacher.Event) {
 	case teacher.Answering:
 		t.answering, t.hushed, t.err = true, false, ""
 		t.reply, t.replyCalls = "", 0
+		t.answeringSpoke, t.spoke = t.spoke, time.Time{}
 	case teacher.Saying:
 		if t.hushed {
 			break
@@ -337,6 +384,9 @@ func (a *app) teacherEvent(e teacher.Event) {
 		t.replyCalls++
 	case teacher.Answered:
 		t.answering, t.saying = false, false
+		if e.Err != nil {
+			t.err = e.Err.Error()
+		}
 		if t.replyCalls > 0 {
 			t.reminded = false
 		} else if !t.hushed && !t.reminded && t.sess != nil && promisesToPlay(t.reply) {
@@ -346,7 +396,13 @@ func (a *app) teacherEvent(e teacher.Event) {
 			t.sess.Tell(playReminder)
 			t.sess.Respond()
 			t.answering = true
+		} else if t.reply == "" && t.replyCalls == 0 && !t.hushed && (e.Err != nil || !t.answeringSpoke.IsZero()) {
+			// It answered the listener with nothing, as it sometimes does,
+			// or its answer failed: they are still to be answered, and are
+			// asked about at once, unless they were once already.
+			t.spoke = teacherNow().Add(-unanswered)
 		}
+		t.answeredAt = teacherNow()
 	case teacher.Failed:
 		t.err = e.Err.Error()
 	case teacher.Closed:
@@ -371,10 +427,10 @@ func promisesToPlay(said string) bool {
 	return playPromise.MatchString(said)
 }
 
-var playPromise = regexp.MustCompile("再放|放一遍|放给你|放第|播放|听一遍|再听|来听|先听|听一下|示范")
+var playPromise = regexp.MustCompile("再放|放一遍|放给你|放第|播放|听一遍|再听|来听|先听|听一下|示范|再来一遍|再来一次|来一遍|开始录|录一下|现在你来唱|轮到你")
 
 // playReminder reminds the teacher to call what it said it would play.
-const playReminder = "（系统提醒，不是学生说的：你刚才说要放给学生听，但没有调用工具。现在就调用相应的工具（play_line、loop_line 或 play_recording），不要再重复说话。）"
+const playReminder = "（系统提醒，不是学生说的：你刚才说要放给学生听或请学生唱，但没有调用工具。现在就调用相应的工具（play_line、loop_line、start_recording 或 play_recording），不要再重复说话。）"
 
 // teacherSpeaking reports whether the teacher's voice plays.
 func (a *app) teacherSpeaking() bool {
@@ -395,11 +451,60 @@ func (a *app) teacherTick() {
 		t.song = song
 		t.sess.Instruct(a.teacherInstructions())
 	}
+	a.teacherWatch()
 	speaking := a.teacherSpeaking()
 	if !speaking && !t.answering {
 		a.runCalls()
 	}
 	t.open.Store(!speaking && !t.answering && len(t.calls) == 0 && !a.pl.Playing() && a.lesson.takes.out == nil && !a.vocalsPlaying())
+}
+
+// teacherWatch keeps the conversation from stalling: the listener heard
+// and not answered is answered, and a response that never comes is
+// waited for no more, the microphone opening again.
+func (a *app) teacherWatch() {
+	t := &a.teacher
+	now := teacherNow()
+	if t.answering && !t.asked {
+		t.lastHeard = now
+	}
+	t.asked = t.answering
+	switch {
+	case t.answering && now.Sub(t.lastHeard) > stuckAnswering:
+		t.log.printf("nothing came of the response: listening again")
+		t.answering, t.saying, t.asked = false, false, false
+	case !t.spoke.IsZero() && !t.answering && len(t.calls) == 0 && !t.nudged && now.Sub(t.spoke) > unanswered:
+		t.log.printf("the listener was not answered: asking")
+		t.spoke, t.nudged = time.Time{}, true
+		t.sess.Respond()
+		t.answering = true
+	}
+}
+
+// logTeacherEvent logs e, but for the teacher's voice and what it hears as
+// it goes: what it says is logged once said.
+func (a *app) logTeacherEvent(e teacher.Event) {
+	t := &a.teacher
+	if t.log == nil {
+		return
+	}
+	switch e.Kind {
+	case teacher.Ready:
+		t.log.printf("← ready")
+	case teacher.Heard:
+		t.log.printf("← heard %q", e.Text)
+	case teacher.Answering:
+		t.log.printf("← answering")
+	case teacher.Calling:
+		args, _ := json.Marshal(e.Call.Args)
+		t.log.printf("← call %s %s %s", e.Call.ID, e.Call.Name, args)
+	case teacher.Answered:
+		t.log.printf("← answered %q, %d calls, err %v", t.reply, t.replyCalls, e.Err)
+	case teacher.Failed:
+		t.log.printf("← failed %v", e.Err)
+	case teacher.Closed:
+		t.log.printf("← closed %v", e.Err)
+	}
 }
 
 // lyricsTrack is the track playing once its lyrics are loaded, else 0.
