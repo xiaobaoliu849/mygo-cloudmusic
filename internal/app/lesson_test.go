@@ -9,6 +9,7 @@ import (
 
 	"netease-music-mygo/internal/lyrics"
 	"netease-music-mygo/internal/netease"
+	"netease-music-mygo/internal/player"
 )
 
 // A click on a line of the lesson pane plays that line alone; with the
@@ -54,7 +55,8 @@ func TestLessonPanePlaysLine(t *testing.T) {
 	}
 }
 
-// The guide's choice sets how loud a line plays to sing along with.
+// The lesson's choices set how loud a line plays to sing along with,
+// and how fast.
 func TestLessonGuideChoice(t *testing.T) {
 	a := newTestApp()
 	a.settings = defaultSettings()
@@ -76,5 +78,12 @@ func TestLessonGuideChoice(t *testing.T) {
 		if a.settings.Guide != o.v {
 			t.Errorf("after %s, guide %v", o.label, a.settings.Guide)
 		}
+	}
+	if err := tt.Click("速度0.75×"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.pl.Tempo() != player.TempoSlow || a.settings.Tempo != player.TempoSlow {
+		t.Errorf("after 0.75×, tempo %v, kept %v", a.pl.Tempo(), a.settings.Tempo)
 	}
 }

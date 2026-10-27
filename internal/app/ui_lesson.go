@@ -8,6 +8,7 @@ import (
 
 	"netease-music-mygo/internal/lyrics"
 	"netease-music-mygo/internal/netease"
+	"netease-music-mygo/internal/player"
 )
 
 // lessonState is the lesson pane: the listener learns a song a line at a
@@ -98,7 +99,16 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 			}
 			ui.Text(c, status).FontSize(12.5).FontWeight(600).TextColor(white.Alpha(0.6))
 		})
-		a.guideChoice(c)
+		ui.Row(c).Gap(20).Padding(0, 0, 0, 8).Children(func() {
+			a.choice(c, "跟唱时原唱", []choiceOption{{"不放", 0}, {"小声", guideSoft}, {"中等", guideMedium}}, a.settings.Guide, func(v float64) {
+				a.settings.Guide = v
+				a.pl.GuideChanged()
+			})
+			a.choice(c, "速度", []choiceOption{{"原速", 1}, {"0.9×", player.TempoSlower}, {"0.75×", player.TempoSlow}}, pl.Tempo(), func(v float64) {
+				a.settings.Tempo = v
+				pl.SetTempo(v)
+			})
+		})
 	})
 
 	scroll := ui.Scroll(c.Key("lesson")).Grow(1).TrackScroll(&ls.scroll).Padding(0, 8, 120, 0)
@@ -160,17 +170,20 @@ const (
 	guideMedium = 0.45
 )
 
-// guideChoice chooses how loud a line plays again once heard, for the
-// listener to sing along with it: not at all, softly, or half as loud.
-func (a *app) guideChoice(c *ui.Context) {
-	ui.Row(c).Gap(4).AlignItems(ui.Center).Padding(0, 0, 0, 8).Children(func() {
-		ui.Text(c, "跟唱时原唱").FontSize(12.5).FontWeight(600).TextColor(white.Alpha(0.5)).Margin(0, 6, 0, 0)
-		for _, o := range []struct {
-			label string
-			v     float64
-		}{{"不放", 0}, {"小声", guideSoft}, {"中等", guideMedium}} {
-			on := a.settings.Guide == o.v
-			b := ui.ButtonBase(c.Key(o.label)).Padding(4, 12).Radius(999).FocusRing(false).Label("跟唱时原唱" + o.label)
+// A choiceOption is one of a choice's values, and what it says.
+type choiceOption struct {
+	label string
+	v     float64
+}
+
+// choice is a row of pills, titled, for one of opts: the one at cur lit.
+// A click on another sets it, and keeps the settings.
+func (a *app) choice(c *ui.Context, title string, opts []choiceOption, cur float64, set func(float64)) {
+	ui.Row(c.Key(title)).Gap(4).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, title).FontSize(12.5).FontWeight(600).TextColor(white.Alpha(0.5)).Margin(0, 6, 0, 0)
+		for _, o := range opts {
+			on := cur == o.v
+			b := ui.ButtonBase(c.Key(o.label)).Padding(4, 12).Radius(999).FocusRing(false).Label(title + o.label)
 			bg, fg := ui.Transparent, white.Alpha(0.55)
 			if on {
 				bg, fg = white.Alpha(0.14), white
@@ -180,9 +193,8 @@ func (a *app) guideChoice(c *ui.Context) {
 			b.Background(b.AnimateColor("bg", bg, ui.Animation{Duration: 120 * time.Millisecond}))
 			b.Children(func() { ui.Text(c, o.label).FontSize(12.5).FontWeight(600).TextColor(fg) })
 			if b.Clicked() && !on {
-				a.settings.Guide = o.v
+				set(o.v)
 				a.settings.save()
-				a.pl.GuideChanged()
 			}
 		}
 	})

@@ -211,6 +211,9 @@ func Run() error {
 		a.pl.Quality = func() string { return a.settings.Quality }
 		a.pl.Normalize = func() bool { return a.settings.Normalize }
 		a.pl.Guide = func() float64 { return a.settings.Guide }
+		if a.settings.Tempo > 0 {
+			a.pl.SetTempo(a.settings.Tempo)
+		}
 		a.pl.Cache = newSongCache(a.settings.CacheMB)
 		a.pl.Changed = func() {
 			a.keepSession()

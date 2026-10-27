@@ -58,6 +58,7 @@ type Player struct {
 	track   *netease.Track
 	out     *audio.Player
 	stream  stream
+	shift   *shifter // between the stream and out, for a lesson's tempo
 	info    *netease.Stream // what the current track streams
 	fade    fader
 	gain    float64 // the current track's normalizing gain
@@ -69,6 +70,7 @@ type Player struct {
 	lyrics       []lyrics.Line
 	lyricsLoaded bool
 	lesson       lesson
+	tempo        float64 // how fast a lesson plays its lines; 0 as the song
 
 	// pending holds a seek asked for while the track loads.
 	pending time.Duration
@@ -457,6 +459,9 @@ func (p *Player) TogglePlay() {
 	}
 	p.playing = true
 	p.applyGain()
+	if p.applyTempo() {
+		p.seek(p.Position())
+	}
 	if !p.seeking && !out.Playing() {
 		if out.Position() >= out.Duration()-time.Second {
 			out.Seek(0)
@@ -479,6 +484,7 @@ const seekGap = 30 * time.Millisecond
 // the listener went elsewhere in the song.
 func (p *Player) Seek(t time.Duration) {
 	p.EndLesson()
+	p.applyTempo()
 	p.seek(t)
 }
 
@@ -584,7 +590,7 @@ func (p *Player) stop() {
 		out.Pause()
 		time.AfterFunc(100*time.Millisecond, out.Close)
 	}
-	p.out, p.stream, p.info = nil, nil, nil
+	p.out, p.stream, p.info, p.shift = nil, nil, nil, nil
 	p.seeking = false
 	p.fade.attach(nil, 1)
 }
@@ -673,7 +679,8 @@ func (p *Player) loadSkipping(at, skipped int, play bool, from time.Duration) {
 			}
 			p.stream, p.info = s, info
 			p.gain = normGain(info)
-			p.out = audio.NewPlayer(s)
+			p.shift = newShifter(s)
+			p.out = audio.NewPlayer(p.shift)
 			// From its middle, as a session picked up again, it fades in.
 			level := 1.0
 			if p.pending > 0 {

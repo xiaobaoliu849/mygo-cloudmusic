@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/egoist/mygo/audio"
+
 	"netease-music-mygo/internal/lyrics"
 )
 
@@ -139,5 +141,38 @@ func TestPlayLineSingsAlongSoftly(t *testing.T) {
 	p.TogglePlay()
 	if g := gain(); g != full {
 		t.Errorf("played on at %v, want %v", g, full)
+	}
+}
+
+// Slower, a line plays at the tempo, still pausing at its end, and the
+// song plays on at its own speed after.
+func TestPlayLineSlower(t *testing.T) {
+	ch, p := posted()
+	p.out.Close()
+	p.shift = newShifter(silence{})
+	out := audio.NewPlayer(p.shift)
+	out.SetVolume(0)
+	out.Play()
+	p.Attach(out)
+	p.fade.attach(out, 1)
+	defer out.Close()
+	p.SetLyrics(lessonLines)
+	p.SetTempo(TempoSlow)
+	start := time.Now()
+	p.PlayLine(1)
+	if s := p.out.Speed(); s != TempoSlow {
+		t.Errorf("line at speed %v", s)
+	}
+	until(t, ch, func() bool { return !p.Playing() })
+	once := lineLead + 300*time.Millisecond + lineTail
+	if took := time.Since(start); took < time.Duration(float64(once)/TempoSlow)-50*time.Millisecond {
+		t.Errorf("line took %v, not slower than %v", took, once)
+	}
+	if pos := p.out.Position(); pos < 10300*time.Millisecond || pos > 11*time.Second {
+		t.Errorf("paused at %v", pos)
+	}
+	p.TogglePlay()
+	if s := p.out.Speed(); s != 1 {
+		t.Errorf("played on at speed %v", s)
 	}
 }

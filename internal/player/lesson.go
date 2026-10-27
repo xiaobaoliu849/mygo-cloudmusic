@@ -17,6 +17,13 @@ type lesson struct {
 	watch int  // counts the waits for the line's end, to drop stale ones
 }
 
+// Tempos a lesson can play its lines at, slower than the song, at its
+// pitch.
+const (
+	TempoSlow   = 0.75
+	TempoSlower = 0.9
+)
+
 // lineLead is how long before a line it starts playing: enough for the
 // music to fade in, and for the listener to hear where the line comes in.
 const lineLead = 400 * time.Millisecond
@@ -31,6 +38,44 @@ func (p *Player) Line() (int, bool) { return p.lesson.line, p.lesson.alone }
 // SingingAlong reports whether the lesson's line plays again, softly, for
 // the listener to sing along with it.
 func (p *Player) SingingAlong() bool { return p.lesson.along }
+
+// Tempo returns how fast a lesson plays its lines: 1 as the song goes, or
+// slower, at the song's pitch.
+func (p *Player) Tempo() float64 {
+	if p.tempo == 0 {
+		return 1
+	}
+	return p.tempo
+}
+
+// SetTempo sets how fast a lesson plays its lines, from 0.5 to 1, the
+// line playing alone starting again at it.
+func (p *Player) SetTempo(t float64) {
+	p.tempo = min(max(t, 0.5), 1)
+	if p.lesson.alone {
+		p.fromLine()
+	}
+}
+
+// applyTempo sets the speed of what plays: a lesson's tempo while its
+// line plays alone, else the song's own. Out slows at once, and lowers
+// the pitch, while the shifter raises it from the next seek, which the
+// caller makes, reported true if needed.
+func (p *Player) applyTempo() bool {
+	if p.out == nil || p.shift == nil {
+		return false
+	}
+	t := 1.0
+	if p.lesson.alone {
+		t = p.Tempo()
+	}
+	if p.out.Speed() == t {
+		return false
+	}
+	p.out.SetSpeed(t)
+	p.shift.setRatio(1 / t)
+	return true
+}
 
 // guide is how loud the line plays as the listener sings along.
 func (p *Player) guide() float64 {
@@ -100,6 +145,7 @@ func (p *Player) span() (from, to time.Duration) {
 // fromLine plays the lesson's line from its start, and waits for its end.
 func (p *Player) fromLine() {
 	from, _ := p.span()
+	p.applyTempo()
 	p.seek(from)
 	switch {
 	case !p.playing:
@@ -121,7 +167,8 @@ func (p *Player) watchLine() {
 	p.lesson.watch++
 	watch := p.lesson.watch
 	_, to := p.span()
-	wait := max(to-p.Position(), 20*time.Millisecond)
+	// The position goes at the speed: slower, it takes longer.
+	wait := max(time.Duration(float64(to-p.Position())/p.Tempo()), 20*time.Millisecond)
 	time.AfterFunc(wait, func() {
 		p.post(func() {
 			if watch == p.lesson.watch {
