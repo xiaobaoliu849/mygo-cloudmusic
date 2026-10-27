@@ -24,6 +24,7 @@ type teacherSession interface {
 	Tell(text string) error
 	Answer(id string, result any) error
 	Respond() error
+	Cancel() error
 	Close()
 }
 
@@ -75,6 +76,9 @@ type teacherState struct {
 	hearing   string      // what the listener says so far, to be revised
 	saying    bool        // the teacher's last utterance goes on
 	answering bool        // the teacher is responding
+	// hushed drops what is left of a response the listener cut short, by
+	// taking over, until the next.
+	hushed bool
 
 	// calls are the response's calls of tools: run in turn once it is
 	// done and heard, each once what the one before started has ended.
@@ -99,9 +103,38 @@ type utterance struct {
 // once it ends.
 type teacherCall struct {
 	teacher.Call
-	ran    bool
-	result any
-	busy   func() bool
+	ran     bool
+	skipped bool // not run: the listener took over
+	result  any
+	busy    func() bool
+}
+
+// skippedCall is what a call the listener took over from comes to.
+func skippedCall() map[string]any {
+	return map[string]any{"skipped": "学生自己操作了播放器，这一步没做；等学生说话再接着教"}
+}
+
+// teacherYield has the teacher give way to the listener, who started or
+// stopped something in the lesson themselves: its voice stops, what is
+// left of its response goes, and its calls are skipped, so that they do
+// not play over what the listener does, nor stop it.
+func (a *app) teacherYield() {
+	t := &a.teacher
+	if t.sess == nil {
+		return
+	}
+	t.voice.Hush()
+	if t.answering {
+		t.sess.Cancel()
+		t.hushed = true
+	}
+	for _, c := range t.calls {
+		if !c.ran {
+			c.ran, c.skipped, c.result = true, true, skippedCall()
+		}
+		c.busy = nil
+	}
+	t.saying = false
 }
 
 // startTeacher connects to the teacher, or, with no API key, asks for one.
@@ -264,19 +297,26 @@ func (a *app) teacherEvent(e teacher.Event) {
 			a.stopRecording()
 		}
 	case teacher.Answering:
-		t.answering, t.err = true, ""
+		t.answering, t.hushed, t.err = true, false, ""
 	case teacher.Saying:
+		if t.hushed {
+			break
+		}
 		if !t.saying {
 			t.said = append(t.said, utterance{teacher: true})
 			t.saying = true
 		}
 		t.said[len(t.said)-1].text += e.Text
 	case teacher.Speech:
-		if t.voice != nil {
+		if t.voice != nil && !t.hushed {
 			t.voice.Say(e.Audio)
 		}
 	case teacher.Calling:
-		t.calls = append(t.calls, &teacherCall{Call: e.Call})
+		c := &teacherCall{Call: e.Call}
+		if t.hushed {
+			c.ran, c.skipped, c.result = true, true, skippedCall()
+		}
+		t.calls = append(t.calls, c)
 	case teacher.Answered:
 		t.answering, t.saying = false, false
 	case teacher.Failed:
@@ -344,12 +384,17 @@ func (a *app) runCalls() {
 			return
 		}
 	}
+	ran := false
 	for _, c := range t.calls {
 		t.sess.Answer(c.ID, c.result)
+		ran = ran || !c.skipped
 	}
 	t.calls = nil
-	t.sess.Respond()
-	t.answering = true
+	// Skipped, the teacher waits for the listener to speak.
+	if ran {
+		t.sess.Respond()
+		t.answering = true
+	}
 }
 
 // toolError is what a tool that could not do what was asked comes to.

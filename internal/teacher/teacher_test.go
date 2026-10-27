@@ -147,6 +147,10 @@ func TestSession(t *testing.T) {
 	if m := f.next(t); m["type"] != "response.create" {
 		t.Errorf("responded %v", m)
 	}
+	s.Cancel()
+	if m := f.next(t); m["type"] != "response.cancel" {
+		t.Errorf("cancelled %v", m)
+	}
 	s.Tell("你好")
 	m = f.next(t)
 	item = m["item"].(map[string]any)

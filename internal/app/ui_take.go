@@ -402,6 +402,7 @@ func (a *app) takeButton(c *ui.Context, key int) {
 		ui.Text(c, clock(time.Duration(len(tk.samples))*time.Second/mic.Rate)).FontSize(12.5).FontWeight(600).FontFeatures("tnum").TextColor(white)
 	})
 	if b.Clicked() {
+		a.teacherYield()
 		if playing {
 			a.stopTake()
 		} else {

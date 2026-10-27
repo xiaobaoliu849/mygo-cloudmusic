@@ -190,6 +190,10 @@ func (s *Session) Tell(text string) error {
 	})
 }
 
+// Cancel stops the model's response on its way, as when the listener
+// takes over.
+func (s *Session) Cancel() error { return s.send(map[string]any{"type": "response.cancel"}) }
+
 // Respond asks the model to go on, as with what its calls came to.
 func (s *Session) Respond() error { return s.send(map[string]any{"type": "response.create"}) }
 

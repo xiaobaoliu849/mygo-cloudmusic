@@ -135,6 +135,7 @@ func (a *app) lessonPane(c *ui.Context, tr *netease.Track) {
 func (a *app) startLesson(n int, again bool) {
 	ls := &a.lesson
 	ls.pointed = 0
+	a.teacherYield()
 	a.stopRecording()
 	a.stopTake()
 	switch {
@@ -161,6 +162,7 @@ func (a *app) lessonBusy() bool {
 // playing back.
 func (a *app) stopLesson() {
 	t := &a.lesson.takes
+	a.teacherYield()
 	switch {
 	case t.out != nil:
 		a.stopTake()

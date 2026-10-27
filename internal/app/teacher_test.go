@@ -18,7 +18,10 @@ type fakeTeacher struct {
 	responded    int
 	closed       bool
 	told         []string
+	cancelled    int
 }
+
+func (f *fakeTeacher) Cancel() error { f.cancelled++; return nil }
 
 func (f *fakeTeacher) Tell(s string) error { f.told = append(f.told, s); return nil }
 
@@ -250,5 +253,42 @@ func TestTeacherPointsAtLines(t *testing.T) {
 	}
 	if r := call("play_line", map[string]any{"n": 9.0}); r["error"] == nil || a.pl.Playing() {
 		t.Errorf("played line 9 of 2: %v", r)
+	}
+}
+
+// The listener starting a line themselves while the teacher answers cuts
+// the teacher short: its response is cancelled, and the line it was
+// about to play is skipped, rather than stopping theirs once its voice
+// ends, and it waits for them to speak.
+func TestTeacherYields(t *testing.T) {
+	a, tt, _, f, _ := teacherApp(t)
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Saying, Text: "我们先来听第二句"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "c1", Name: "play_line", Args: map[string]any{"n": 2.0}}})
+	if err := tt.Click("悴んだ心ふるえる眼差し"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if f.cancelled != 1 {
+		t.Errorf("cancelled %d times", f.cancelled)
+	}
+	// What is left of the cut response goes.
+	a.teacherEvent(teacher.Event{Kind: teacher.Saying, Text: "，注意换气"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "c2", Name: "pause"}})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	if n, alone := a.pl.Line(); n != 0 || !alone || !a.pl.Playing() {
+		t.Errorf("the listener's line: line %d, alone %v, playing %v", n, alone, a.pl.Playing())
+	}
+	for _, id := range []string{"c1", "c2"} {
+		if r, _ := f.answers[id].(map[string]any); r["skipped"] == nil {
+			t.Errorf("%s answered %v", id, f.answers[id])
+		}
+	}
+	if f.responded != 0 {
+		t.Error("the teacher went on, not waiting for the listener")
+	}
+	if said := a.teacher.said; said[len(said)-1].text != "我们先来听第二句" {
+		t.Errorf("said %q", said[len(said)-1].text)
 	}
 }
