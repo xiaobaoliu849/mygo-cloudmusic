@@ -2,6 +2,7 @@ package lyrics
 
 import (
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -125,8 +126,14 @@ func Build(lrc, translation, yrc string) []Line {
 		}
 		for i := range lines {
 			end := lines[i].At + 6*time.Second
-			if i+1 < len(lines) {
-				end = min(end, lines[i+1].At)
+			for _, next := range lines[i+1:] {
+				// A line sung goes on through a credit after it, as the
+				// singer of the next named: it ends as the next line sung
+				// begins.
+				if IsCredit(lines[i].Text) || !IsCredit(next.Text) {
+					end = min(end, next.At)
+					break
+				}
 			}
 			lines[i].End = end
 			lines[i].Words = SpreadWords(lines[i].Text, lines[i].At, end)
@@ -262,8 +269,12 @@ func Quiets(lines []Line, length, least time.Duration) []Quiet {
 var creditNames = []string{"作词", "作曲", "编曲", "制作", "监制", "混音", "录音", "母带", "和声", "吉他", "贝斯", "鼓", "键盘", "弦乐", "出品", "发行", "OP", "SP", "词", "曲", "Lyrics", "Music", "Composer", "Arranger", "Producer"}
 
 // IsCredit reports whether a line names who made the song, as "作词 :
-// 林夕", rather than being sung.
+// 林夕", or who sings what follows, as "GIRL(青山テルマ)", rather than
+// being sung.
 func IsCredit(text string) bool {
+	if isSinger(text) {
+		return true
+	}
 	i := strings.IndexAny(text, ":：")
 	if i <= 0 || utf8.RuneCountInString(text[:i]) > 12 {
 		return false
@@ -276,4 +287,18 @@ func IsCredit(text string) bool {
 		}
 	}
 	return false
+}
+
+// singerRoles are what a line naming the singer of what follows calls
+// them, lowercased.
+var singerRoles = []string{"boy", "girl", "man", "woman", "male", "female", "all", "both", "rap", "mc", "男", "女", "合", "合唱"}
+
+// singerLine is a word with a name in brackets after it, a colon, or both.
+var singerLine = regexp.MustCompile(`^([^\s()（）:：]+)\s*(?:[(（][^()（）]*[)）])?\s*[:：]?$`)
+
+// isSinger reports whether a line is no more than the singer of what
+// follows, as "BOY(SoulJa):" or "女：": not "女" alone, nor "Oh(oh)".
+func isSinger(text string) bool {
+	m := singerLine.FindStringSubmatch(text)
+	return m != nil && m[0] != m[1] && slices.Contains(singerRoles, strings.ToLower(m[1]))
 }

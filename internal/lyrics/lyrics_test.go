@@ -107,9 +107,31 @@ func TestIsCredit(t *testing.T) {
 		"悴んだ心 ふるえる眼差し":       false,
 		"词：方文山":              true,
 		"曲终人散：空余叹":           false,
+		"BOY(SoulJa):":       true,
+		"GIRL(青山テルマ)":         true,
+		"女：":                 true,
+		"（BOY:君のぬくもり":        false,
+		"Oh(oh)":             false,
+		"女":                  false,
 	} {
 		if IsCredit(text) != want {
 			t.Errorf("%q: %v", text, !want)
 		}
+	}
+}
+
+// A line goes on through the singer of the next named after it, to the
+// next line sung: そばにいるね's "今じゃ殘された君はアルバムの中" stopped at
+// "GIRL(青山テルマ)", short of its last words.
+func TestLineEndsAtNextSung(t *testing.T) {
+	lines := Build("[02:44.74]今じゃ殘された君はアルバムの中\n[02:47.20]GIRL(青山テルマ)\n[02:47.95]アルバムの中 納めた思い出の\n", "", "")
+	if len(lines) != 3 {
+		t.Fatalf("lines %+v", lines)
+	}
+	if want := 2*time.Minute + 47950*time.Millisecond; lines[0].End != want {
+		t.Errorf("the line ends at %v, want %v", lines[0].End, want)
+	}
+	if lines[1].End != lines[2].At {
+		t.Errorf("the singer's line ends at %v, want %v", lines[1].End, lines[2].At)
 	}
 }
