@@ -13,13 +13,17 @@ import (
 // A teacherLog writes down what goes between the app and the teacher, a
 // session at a time, to teacher.log in the cache: to find out what went
 // wrong when the teacher goes quiet, or says the same again. The sound
-// either way is left out; what was said, written down, is in.
+// either way is left out; what was said, written down, is in. The
+// sessions before are kept, the last in teacher.1.log, and so on.
 type teacherLog struct {
 	f     *os.File
 	start time.Time
 }
 
-// openTeacherLog starts the log of a session over, or returns nil.
+// keptTeacherLogs is how many sessions' logs are kept, this one's with them.
+const keptTeacherLogs = 10
+
+// openTeacherLog starts the log of a session, or returns nil.
 func openTeacherLog() *teacherLog {
 	dir, err := mygo.App.Path(mygo.PathCache)
 	if err != nil {
@@ -28,6 +32,7 @@ func openTeacherLog() *teacherLog {
 	if os.MkdirAll(dir, 0o755) != nil {
 		return nil
 	}
+	rotateTeacherLogs(dir)
 	f, err := os.Create(filepath.Join(dir, "teacher.log"))
 	if err != nil {
 		return nil
@@ -35,6 +40,22 @@ func openTeacherLog() *teacherLog {
 	l := &teacherLog{f: f, start: time.Now()}
 	l.printf("session %s", l.start.Format(time.DateTime))
 	return l
+}
+
+// rotateTeacherLogs moves the logs in dir one session back, for a new
+// teacher.log: teacher.log to teacher.1.log, that to teacher.2.log, and the
+// oldest past keptTeacherLogs gone.
+func rotateTeacherLogs(dir string) {
+	name := func(n int) string {
+		if n == 0 {
+			return filepath.Join(dir, "teacher.log")
+		}
+		return filepath.Join(dir, fmt.Sprintf("teacher.%d.log", n))
+	}
+	os.Remove(name(keptTeacherLogs - 1))
+	for n := keptTeacherLogs - 2; n >= 0; n-- {
+		os.Rename(name(n), name(n+1))
+	}
 }
 
 // printf writes a line, after the seconds since the session started.

@@ -283,7 +283,7 @@ func (a *app) teacherDialed(gen int, s teacherSession, err error) {
 	}
 	if a.win != nil {
 		t.log = openTeacherLog()
-		t.log.printf("provider %s", cmp.Or(a.settings.TeacherProvider, "dashscope"))
+		t.log.printf("provider %s, headphones %t", cmp.Or(a.settings.TeacherProvider, "dashscope"), a.settings.Headphones)
 		s = loggedSession{s, t.log}
 	}
 	t.sess = s
@@ -380,6 +380,7 @@ func (a *app) teacherEvent(e teacher.Event) {
 		if rec := a.lesson.takes.rec; rec != nil && a.strayHeard(e.Text, rec.key) {
 			// A breath or a noise as the listener begins: the take goes on,
 			// and the teacher's answer to it goes, now or as it begins.
+			t.log.printf("too short for the line: dropped as a breath or a noise")
 			if t.answering && t.sess != nil {
 				if t.voice != nil {
 					t.voice.Hush()
@@ -444,7 +445,7 @@ func (a *app) teacherEvent(e teacher.Event) {
 			// it heard the start of itself, and took it for the listener
 			// cutting in.
 			if t.open != nil && !a.teacherHears(true, false) {
-				t.open.Store(false)
+				a.teacherEar(false, true)
 			}
 			t.voice.Say(e.Audio)
 		}
@@ -603,7 +604,41 @@ func (a *app) teacherTick() {
 	if !speaking && !t.answering {
 		a.runCalls()
 	}
-	t.open.Store(a.teacherHears(speaking, recording))
+	a.teacherEar(a.teacherHears(speaking, recording), speaking)
+}
+
+// teacherEar has the microphone go to the teacher or not, logging when it
+// changes, and what shut it: what the listener says then, the teacher
+// never hears, and nothing else would say so.
+func (a *app) teacherEar(open, speaking bool) {
+	t := &a.teacher
+	if t.open.Swap(open) == open {
+		return
+	}
+	if open {
+		t.log.printf("mic open")
+		return
+	}
+	var by []string
+	if speaking {
+		by = append(by, "teacher speaking")
+	}
+	if a.pl.Playing() {
+		by = append(by, "song playing")
+	}
+	if n := len(t.calls); n > 0 {
+		by = append(by, fmt.Sprintf("%d calls to run", n))
+	}
+	if a.lesson.takes.out != nil {
+		by = append(by, "take playing")
+	}
+	if a.vocalsPlaying() {
+		by = append(by, "vocals playing")
+	}
+	if t.answering {
+		by = append(by, "answering")
+	}
+	t.log.printf("mic shut: %s", strings.Join(by, ", "))
 }
 
 // teacherHears reports whether the microphone goes to the teacher now.
