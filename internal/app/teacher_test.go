@@ -717,6 +717,108 @@ func TestTeacherRemindedToMoveOn(t *testing.T) {
 	}
 }
 
+// Gemini hears the listener as it thinks: they spoke, and it was deaf,
+// up to 15 s, as it chose to say nothing. What plays it still does not
+// hear, through speakers, as the listener.
+func TestGeminiHearsAsItThinks(t *testing.T) {
+	a, _, _, f, hear := teacherApp(t)
+	a.settings.TeacherProvider = teacher.Gemini
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherTick()
+	hear(make([]float32, 4800))
+	if f.heard == 0 {
+		t.Fatal("deaf as the teacher thinks")
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "c1", Name: "play_line", Args: map[string]any{"n": 1.0}}})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	heard := f.heard
+	hear(make([]float32, 4800))
+	if !a.pl.Playing() || f.heard != heard {
+		t.Errorf("as the line plays through speakers: playing %v, heard %d more", a.pl.Playing(), f.heard-heard)
+	}
+
+	// The line played, it thinks again, hearing; its voice arriving, it
+	// stops hearing at once, not at the next tick: it heard the start of
+	// itself, and took it for the listener cutting in.
+	a.pl.StopLine()
+	a.teacherTick()
+	a.teacherTick()
+	heard = f.heard
+	hear(make([]float32, 4800))
+	if f.heard == heard {
+		t.Fatal("deaf as the teacher thinks on")
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Speech, Audio: make([]float32, teacher.OutRate/10)})
+	heard = f.heard
+	hear(make([]float32, 4800))
+	if f.heard != heard {
+		t.Error("heard its own voice begin")
+	}
+}
+
+// Spoken over, the teacher stops at once, and what it calls in what was
+// left of its answer does not run; a call it takes back stops what it
+// plays, and is not answered.
+func TestTeacherInterrupted(t *testing.T) {
+	a, _, _, f, _ := teacherApp(t)
+	a.settings.TeacherProvider = teacher.Gemini
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Speech, Audio: make([]float32, teacher.OutRate)})
+	a.teacherEvent(teacher.Event{Kind: teacher.Interrupted})
+	if a.teacherSpeaking() {
+		t.Error("spoke on over the listener")
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "c1", Name: "play_line", Args: map[string]any{"n": 1.0}}})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	if a.pl.Playing() {
+		t.Error("played the line called after it was spoken over")
+	}
+
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "c2", Name: "play_line", Args: map[string]any{"n": 1.0}}})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	if !a.pl.Playing() {
+		t.Fatal("did not play the line")
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Withdrawn, Call: teacher.Call{ID: "c2"}})
+	a.teacherTick()
+	if a.pl.Playing() || f.answers["c2"] != nil {
+		t.Errorf("a call taken back: playing %v, answered %v", a.pl.Playing(), f.answers["c2"])
+	}
+}
+
+// Wearing headphones, the listener speaks over the line the teacher plays:
+// it stops, and the teacher is told, to hear them out. Singing along with
+// it, it plays on.
+func TestTeacherBargeIn(t *testing.T) {
+	a, _, _, f, hear := teacherApp(t)
+	a.settings.TeacherProvider = teacher.Gemini
+	a.settings.Headphones = true
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "c1", Name: "play_line", Args: map[string]any{"n": 1.0}}})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	hear(make([]float32, 4800))
+	if !a.pl.Playing() || f.heard == 0 {
+		t.Fatalf("as the line plays: playing %v, heard %d", a.pl.Playing(), f.heard)
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Hearing, Text: "悴んだ心ふる"})
+	a.teacherTick()
+	if !a.pl.Playing() {
+		t.Fatal("stopped as the listener sang along")
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Hearing, Text: "等一下，这个词怎么念"})
+	a.teacherTick()
+	a.teacherTick()
+	r, _ := f.answers["c1"].(map[string]any)
+	if a.pl.Playing() || r["interrupted"] != bargedIn {
+		t.Errorf("spoken over: playing %v, answered %v", a.pl.Playing(), f.answers["c1"])
+	}
+}
+
 // A promise to sing the line again, as "好，我们再来一遍第7句。", with
 // nothing called, is reminded to call it: it was not, and nothing played.
 func TestTeacherRemindedToSingAgain(t *testing.T) {

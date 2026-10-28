@@ -82,6 +82,8 @@ const (
 	Failed                // the model reports an error, Err; the session goes on
 	Closed                // the session ended, with Err unless asked to
 	Resumed               // the connection ended, why as Text, and the session goes on over another
+	Interrupted           // the listener cut the model short: what it says is to play no more
+	Withdrawn             // the model takes back its call Call.ID, the listener having cut it short
 )
 
 // A Session is a conversation with the model.

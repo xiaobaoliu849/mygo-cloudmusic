@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -438,6 +439,13 @@ func (a *app) teacherEvent(e teacher.Event) {
 		t.reply += e.Text
 	case teacher.Speech:
 		if t.voice != nil && !t.hushed {
+			// Its voice about to play, the microphone stops going to it now,
+			// not at the next tick: through speakers, hearing as it thought,
+			// it heard the start of itself, and took it for the listener
+			// cutting in.
+			if t.open != nil && !a.teacherHears(true, false) {
+				t.open.Store(false)
+			}
 			t.voice.Say(e.Audio)
 		}
 	case teacher.Calling:
@@ -479,9 +487,34 @@ func (a *app) teacherEvent(e teacher.Event) {
 			t.err = teacherLost + e.Err.Error()
 		}
 		a.stopTeacher()
+	case teacher.Interrupted:
+		// Spoken over, it stops at once, rather than say out what it had
+		// to say over the listener.
+		if t.voice != nil {
+			t.voice.Hush()
+		}
+		t.hushed = true
+	case teacher.Withdrawn:
+		a.withdrawCall(e.Call.ID)
 	}
 	if len(t.said) > 60 {
 		t.said = t.said[len(t.said)-60:]
+	}
+}
+
+// withdrawCall drops the teacher's call id, taken back as the listener cut
+// it short: what it plays stops, and what it came to is not told.
+func (a *app) withdrawCall(id string) {
+	t := &a.teacher
+	for i, c := range t.calls {
+		if c.ID != id {
+			continue
+		}
+		if c.ran && c.busy != nil && c.busy() {
+			a.runTool(teacher.Call{Name: "pause"})
+		}
+		t.calls = slices.Delete(t.calls, i, i+1)
+		return
 	}
 }
 
@@ -555,6 +588,7 @@ func (a *app) teacherTick() {
 	}
 	a.teacherWatch()
 	recording := t.take && a.lesson.takes.rec != nil
+	a.bargeIn()
 	if t.take && a.lesson.takes.rec == nil && !t.answering {
 		// The take ran out with the line not heard sung: told so, once
 		// what it answers now is done, the teacher has them sing it again,
@@ -569,10 +603,81 @@ func (a *app) teacherTick() {
 	if !speaking && !t.answering {
 		a.runCalls()
 	}
-	// In a take it asked for, it hears the singing even as an answer to
-	// be dropped is on its way: it missed the start of the line, deaf
-	// until that answer was done.
-	t.open.Store(!speaking && (!t.answering || recording) && len(t.calls) == 0 && !a.pl.Playing() && a.lesson.takes.out == nil && !a.vocalsPlaying())
+	t.open.Store(a.teacherHears(speaking, recording))
+}
+
+// teacherHears reports whether the microphone goes to the teacher now.
+// Nothing playing, it does: the music or the teacher's voice, heard, would
+// be taken for the listener. Worn headphones hear neither: with Gemini,
+// which the listener cuts short by speaking, it always does.
+//
+// DashScope does not hear while it answers, nor would it stop for what it
+// heard. In a take it asked for, it hears the singing even as an answer to
+// be dropped is on its way: it missed the start of the line, deaf until
+// that answer was done. Gemini hears as it thinks: it answers what the
+// listener says then, and kept them waiting, deaf, as it chose to say
+// nothing.
+func (a *app) teacherHears(speaking, recording bool) bool {
+	t := &a.teacher
+	duplex := a.teacherDuplex()
+	if duplex && a.settings.Headphones {
+		return true
+	}
+	quiet := !speaking && len(t.calls) == 0 && !a.pl.Playing() && a.lesson.takes.out == nil && !a.vocalsPlaying()
+	return quiet && (!t.answering || recording || duplex)
+}
+
+// teacherDuplex reports whether the teacher hears as it answers, cut short
+// by the listener speaking over it: Gemini's is, DashScope's not.
+func (a *app) teacherDuplex() bool {
+	return a.settings.TeacherProvider == teacher.Gemini
+}
+
+// bargeIn stops what the teacher's call plays once the listener speaks
+// over it, wearing headphones, for the teacher to hear them out: it is
+// told so, as what the call came to. Singing along with the line is not
+// speaking over it.
+func (a *app) bargeIn() {
+	t := &a.teacher
+	if !a.teacherDuplex() || !a.settings.Headphones || letterCount(t.hearing) < 3 {
+		return
+	}
+	for _, c := range t.calls {
+		if !c.ran || c.skipped || c.busy == nil || !c.busy() {
+			continue
+		}
+		if lines, _ := a.pl.Lyrics(); c.Name != "play_recording" {
+			if n, _ := a.pl.Line(); n >= 0 && n < len(lines) && singsAlong(t.hearing, lines[n].Text) {
+				return
+			}
+		}
+		t.log.printf("the listener spoke over %s: %q", c.Name, t.hearing)
+		a.runTool(teacher.Call{Name: "pause"})
+		c.result = map[string]any{"interrupted": bargedIn}
+		return
+	}
+}
+
+// bargedIn tells the teacher the listener spoke over what its call played.
+const bargedIn = "放的时候学生开口跟你说话了，已经停下：先听他说完，回应他说的，不要接着原来的安排"
+
+// singsAlong reports whether what the listener said, as written down, is
+// the line they sing along with: most of its letters are the line's.
+func singsAlong(heard, line string) bool {
+	in := map[rune]bool{}
+	for _, r := range line {
+		in[unicode.ToLower(r)] = true
+	}
+	n, of := 0, 0
+	for _, r := range heard {
+		if unicode.IsLetter(r) {
+			of++
+			if in[unicode.ToLower(r)] {
+				n++
+			}
+		}
+	}
+	return of > 0 && 2*n >= of
 }
 
 // teacherWatch keeps the conversation from stalling: the listener heard
@@ -628,6 +733,10 @@ func (a *app) logTeacherEvent(e teacher.Event) {
 		t.log.printf("← closed %v", e.Err)
 	case teacher.Resumed:
 		t.log.printf("← resumed over another connection, the last ended %q", e.Text)
+	case teacher.Interrupted:
+		t.log.printf("← interrupted")
+	case teacher.Withdrawn:
+		t.log.printf("← withdrew %s", e.Call.ID)
 	}
 }
 
@@ -947,6 +1056,7 @@ const teacherPrompt = `你是一位耐心、温暖的声乐老师，在一个音
    不要空夸：不说"很温暖""很好听""很有感情""完美"这种没有内容的话；要夸就说出好在哪个音、哪个词。没听清他唱了什么，或者他只唱了一点，就直说，请他再唱一遍，不要假装听到了。
    只有拿不准时才偶尔问学生想再练还是下一句，而且每次换个问法。
 4. 学生说要再来、下一句、放慢，就照做。
+5. 学生随时可能打断你，或者在你想事情、放歌的时候开口：先停下来听他说完，回应他说的，再接着上课。学生唱完或者跟你说话，每次都要回应，不要不出声。
 
 学生也可以随时提要求：放慢（slow_down）、听整首（play_song）、听自己唱的（play_recording）。歌词的行号从 1 开始，和学生屏幕上的编号一样。日语歌词可以用假名或罗马音帮学生读准；歌词后方括号里的是网易云给的这句的罗马音，有就照它的读法纠正发音。歌在放的时候你听不到学生说话。
 

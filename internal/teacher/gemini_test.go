@@ -197,6 +197,37 @@ func TestGeminiResumes(t *testing.T) {
 	}
 }
 
+// Spoken over, Gemini says it was interrupted, and takes back a call it
+// made: the app is told both, to hush its voice and stop what it plays.
+// It was told neither, and the teacher talked on over the listener.
+func TestGeminiInterrupted(t *testing.T) {
+	f, url := newFakeModel(t)
+	f.send <- map[string]any{"setupComplete": map[string]any{}}
+	ch := make(chan Event, 32)
+	s, err := DialGemini(Config{URL: url, Key: "g-key"}, func(e Event) { ch <- e })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	f.next(t)
+	events(t, ch) // Ready
+	f.send <- map[string]any{"serverContent": map[string]any{"outputTranscription": map[string]any{"text": "我们"}}}
+	f.send <- map[string]any{"serverContent": map[string]any{"interrupted": true}}
+	f.send <- map[string]any{"toolCallCancellation": map[string]any{"ids": []any{"c1"}}}
+	want := []func(Event) bool{
+		func(e Event) bool { return e.Kind == Answering },
+		func(e Event) bool { return e.Kind == Saying },
+		func(e Event) bool { return e.Kind == Interrupted },
+		func(e Event) bool { return e.Kind == Answered },
+		func(e Event) bool { return e.Kind == Withdrawn && e.Call.ID == "c1" },
+	}
+	for i, ok := range want {
+		if e := events(t, ch); !ok(e) {
+			t.Errorf("event %d: %+v", i, e)
+		}
+	}
+}
+
 // The reason Gemini ends a connection with is found in the last frame
 // read: the websocket package read it as io.EOF, and the listener saw only
 // "connection to Gemini lost: EOF".

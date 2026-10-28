@@ -428,6 +428,9 @@ type geminiMessage struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
+	ToolCallCancellation *struct {
+		IDs []string `json:"ids"`
+	} `json:"toolCallCancellation"`
 	SessionResumptionUpdate *struct {
 		NewHandle string `json:"newHandle"`
 		Resumable bool   `json:"resumable"`
@@ -522,6 +525,11 @@ func (s *GeminiSession) read(got func(Event)) {
 					}
 				}
 			}
+			if sc.Interrupted && inTurn {
+				// The listener spoke over it: what it said and is still to
+				// play goes.
+				got(Event{Kind: Interrupted})
+			}
 			if (sc.TurnComplete || sc.Interrupted) && !inTurn && s.awaited.Load() {
 				// The answer asked for, with nothing said.
 				begin()
@@ -545,6 +553,11 @@ func (s *GeminiSession) read(got func(Event)) {
 				got(Event{Kind: Calling, Call: Call{ID: c.ID, Name: c.Name, Args: args}})
 			}
 			end()
+		}
+		if tc := m.ToolCallCancellation; tc != nil {
+			for _, id := range tc.IDs {
+				got(Event{Kind: Withdrawn, Call: Call{ID: id}})
+			}
 		}
 	}
 }

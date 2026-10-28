@@ -92,19 +92,27 @@ func (a *app) teacherPanel(c *ui.Context) {
 	if a.settings.TeacherProvider == teacher.Gemini {
 		who = "Gemini"
 	}
-	state, listening := "正在连接 AI 老师（"+who+"）…", false
+	state := "正在连接 AI 老师（" + who + "）…"
+	// Hearing them as it talks, thinks or plays, it says they may speak.
+	listening := t.sess != nil && t.open != nil && t.open.Load()
+	cut := ""
+	if listening {
+		cut = " · 说话就能打断"
+	}
 	switch {
 	case t.sess == nil:
 	case a.teacherSpeaking() || t.saying:
-		state = "已连上" + who + " · 老师在说"
+		state = "已连上" + who + " · 老师在说" + cut
 	case t.answering || len(t.calls) > 0 && !a.pl.Playing():
-		state = "已连上" + who + " · 老师在想"
+		state = "已连上" + who + " · 老师在想" + cut
+	case (a.pl.Playing() || a.lesson.takes.out != nil) && listening:
+		state = "已连上" + who + " · 在放" + cut
 	case a.pl.Playing() || a.lesson.takes.out != nil:
 		state = "已连上" + who + " · 在放，放完老师再听你说"
 	case a.lesson.takes.rec != nil:
-		state, listening = "已连上"+who+" · 在听你唱", true
+		state = "已连上" + who + " · 在听你唱"
 	default:
-		state, listening = "已连上"+who+" · 在听你说，直接说话就行", true
+		state = "已连上" + who + " · 在听你说，直接说话就行"
 	}
 	ui.Column(c.Key("teacher-panel")).Gap(6).Margin(6, 8, 0, 8).Padding(10, 14).Radius(14).Background(white.Alpha(0.06)).Children(func() {
 		if t.on {

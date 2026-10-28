@@ -481,6 +481,12 @@ func (a *app) settingsButton(c *ui.Context) {
 				}
 			})
 		})
+		setting("戴耳机", "戴着耳机，老师说话、放歌时也能开口打断（Gemini）", func() {
+			choice(c, "戴耳机", []choiceOption{{"戴着", 1}, {"没戴", 0}}, boolValue(a.settings.Headphones), func(v float64) {
+				a.settings.Headphones = v == 1
+				a.settings.save()
+			})
+		})
 		setting("罗马音", "歌词下面标出怎么念", func() {
 			choice(c, "罗马音", []choiceOption{{"开", 1}, {"关", 0}}, boolValue(!a.settings.HideRomaji), func(v float64) {
 				a.settings.HideRomaji = v == 0

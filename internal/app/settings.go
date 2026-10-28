@@ -76,6 +76,10 @@ type settings struct {
 	TeacherProvider string `json:"teacherProvider,omitempty"`
 	// TeacherEnglish has the AI teacher speak English, not Chinese.
 	TeacherEnglish bool `json:"teacherEnglish,omitempty"`
+	// Headphones says the listener wears them: the microphone does not
+	// hear the music or the teacher, and goes to the teacher all the time,
+	// for them to cut it short by speaking.
+	Headphones bool `json:"headphones,omitempty"`
 	// CacheMB is how many megabytes the songs kept on disk may take; 0
 	// keeps none.
 	CacheMB int `json:"cacheMB"`
