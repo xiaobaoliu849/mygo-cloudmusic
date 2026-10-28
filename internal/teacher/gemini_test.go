@@ -3,8 +3,13 @@ package teacher
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"golang.org/x/net/websocket"
 )
 
 // A Gemini session connects with the key, sets itself up with the model,
@@ -35,6 +40,11 @@ func TestGeminiSession(t *testing.T) {
 	decl := setup["tools"].([]any)[0].(map[string]any)["functionDeclarations"].([]any)[0].(map[string]any)
 	if decl["name"] != "play_line" || decl["parametersJsonSchema"] == nil {
 		t.Errorf("declared %v", decl)
+	}
+	// Gemini 3.8 Live does not wait on a call unless told: it talked on
+	// over the line it played, and the connection ended.
+	if decl["behavior"] != "BLOCKING" {
+		t.Errorf("declared to run %v", decl["behavior"])
 	}
 	if e := events(t, ch); e.Kind != Ready {
 		t.Errorf("first %+v", e)
@@ -116,6 +126,90 @@ func TestGeminiSession(t *testing.T) {
 
 	s.Close()
 	for e := events(t, ch); e.Kind != Closed; e = events(t, ch) {
+	}
+}
+
+// Gemini ends a connection after some minutes: the session resumes over
+// another with the handle it was last given, and goes on. It ended the
+// lesson instead, "connection to Gemini lost: EOF".
+func TestGeminiResumes(t *testing.T) {
+	setups := make(chan map[string]any, 4)
+	got := make(chan map[string]any, 16)
+	var conns atomic.Int32
+	ws := websocket.Server{Handler: func(c *websocket.Conn) {
+		var setup map[string]any
+		if websocket.JSON.Receive(c, &setup) != nil {
+			return
+		}
+		setups <- setup["setup"].(map[string]any)
+		websocket.JSON.Send(c, map[string]any{"setupComplete": map[string]any{}})
+		if conns.Add(1) == 1 {
+			websocket.JSON.Send(c, map[string]any{"sessionResumptionUpdate": map[string]any{"newHandle": "h1", "resumable": true}})
+			// Not resumable at this point: not the handle to resume with.
+			websocket.JSON.Send(c, map[string]any{"sessionResumptionUpdate": map[string]any{"newHandle": "h2", "resumable": false}})
+			time.Sleep(50 * time.Millisecond)
+			return
+		}
+		for {
+			var m map[string]any
+			if websocket.JSON.Receive(c, &m) != nil {
+				return
+			}
+			got <- m
+		}
+	}}
+	srv := httptest.NewServer(ws)
+	defer srv.Close()
+
+	ch := make(chan Event, 16)
+	s, err := DialGemini(Config{URL: "ws" + strings.TrimPrefix(srv.URL, "http"), Key: "g-key"}, func(e Event) { ch <- e })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	first := <-setups
+	if r, ok := first["sessionResumption"].(map[string]any); !ok || r["handle"] != nil {
+		t.Errorf("first set up to resume %v", first["sessionResumption"])
+	}
+	if e := events(t, ch); e.Kind != Ready {
+		t.Errorf("first %+v", e)
+	}
+	if e := events(t, ch); e.Kind != Resumed {
+		t.Fatalf("as the connection ended: %+v", e)
+	}
+	select {
+	case again := <-setups:
+		if h := again["sessionResumption"].(map[string]any)["handle"]; h != "h1" {
+			t.Errorf("resumed with %v", h)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not connect again")
+	}
+	s.Tell("你好")
+	s.Respond()
+	select {
+	case m := <-got:
+		if m["clientContent"] == nil {
+			t.Errorf("sent %v", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("sent nothing over the new connection")
+	}
+}
+
+// The reason Gemini ends a connection with is found in the last frame
+// read: the websocket package read it as io.EOF, and the listener saw only
+// "connection to Gemini lost: EOF".
+func TestCloseReason(t *testing.T) {
+	reason := "Request contains an invalid argument."
+	frame := append([]byte{0x88, byte(2 + len(reason)), 0x03, 0xef}, reason...)
+	c := &tailConn{tail: append([]byte(`{"serverContent":{}}`), frame...)}
+	if got := c.closeReason(); got != "1007 "+reason {
+		t.Errorf("closed with %q", got)
+	}
+	c.tail = append(c.tail, `{"more":1}`...)
+	if got := c.closeReason(); got != "" {
+		t.Errorf("not closed, read as closed with %q", got)
 	}
 }
 

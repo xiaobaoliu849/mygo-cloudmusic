@@ -81,6 +81,7 @@ const (
 	Answered              // the model's response is done, with Err if it failed
 	Failed                // the model reports an error, Err; the session goes on
 	Closed                // the session ended, with Err unless asked to
+	Resumed               // the connection ended, why as Text, and the session goes on over another
 )
 
 // A Session is a conversation with the model.

@@ -476,7 +476,7 @@ func (a *app) teacherEvent(e teacher.Event) {
 		}
 	case teacher.Closed:
 		if e.Err != nil {
-			t.err = "和 AI 老师断开了：" + e.Err.Error()
+			t.err = teacherLost + e.Err.Error()
 		}
 		a.stopTeacher()
 	}
@@ -523,6 +523,10 @@ func promisesToPlay(said string) bool {
 
 var playPromise = regexp.MustCompile("(?i)再放|放一遍|放给你|放第|播放|听一遍|再听|来听|先听|听一下|示范|再来一遍|再来一次|来一遍|开始录|录一下|现在你来唱|轮到你|该你唱|该你了|下一句|" +
 	`next line|next one|move on|listen (again|to)|let's (hear|listen|try|play)|play it|one more time|your turn`)
+
+// teacherLost is what the teacher's error begins with once the connection
+// to it is lost, the key being no matter.
+const teacherLost = "和 AI 老师断开了："
 
 // silentTake tells the teacher the take ran out with nothing sung.
 const silentTake = "（系统提醒，不是学生说的：录音时间到了，学生这一句没有唱出声。不要评价，也不要换下一句；简短、换个说法鼓励他跟着唱，然后用 play_line 再放这一句。）"
@@ -622,6 +626,8 @@ func (a *app) logTeacherEvent(e teacher.Event) {
 		t.log.printf("← failed %v", e.Err)
 	case teacher.Closed:
 		t.log.printf("← closed %v", e.Err)
+	case teacher.Resumed:
+		t.log.printf("← resumed over another connection, the last ended %q", e.Text)
 	}
 }
 

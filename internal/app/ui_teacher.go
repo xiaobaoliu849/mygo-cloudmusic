@@ -128,6 +128,20 @@ func (a *app) teacherPanel(c *ui.Context) {
 		switch {
 		case t.ask:
 			a.teacherKeyForm(c)
+		case !t.on && strings.HasPrefix(t.err, teacherLost):
+			// The connection was lost, not the key: it connects again.
+			again := ui.ButtonBase(c.Key("reconnect")).Row().AlignSelf(ui.Start).FocusRing(false).Label("重新连上")
+			again.Children(func() {
+				fg := white.Alpha(0.6)
+				if again.Hovered() {
+					fg = white
+				}
+				ui.Text(c, "重新连上").FontSize(12.5).FontWeight(600).TextColor(fg)
+			})
+			if again.Clicked() {
+				t.err = ""
+				a.startTeacher()
+			}
 		case !t.on && t.err != "":
 			// It went wrong, perhaps for the key.
 			change := ui.ButtonBase(c.Key("change-key")).Row().AlignSelf(ui.Start).FocusRing(false).Label("换一个 API Key")
