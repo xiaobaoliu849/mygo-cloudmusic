@@ -265,8 +265,8 @@ func (a *app) record(key int, limit, from time.Duration) {
 }
 
 // stopRecording ends the take on its way, keeping it unless too short to
-// be singing, and saving it as a file, then plays it back, unless the
-// music plays on.
+// be singing, and saving it as a file, but for the teacher, who heard it
+// as it was sung, then plays it back, unless the music plays on.
 func (a *app) stopRecording() {
 	t := &a.lesson.takes
 	rec := t.rec
@@ -300,7 +300,8 @@ func (a *app) stopRecording() {
 	}
 	rec.take.samples = samples
 	t.sung[rec.key] = rec.take
-	if a.win != nil {
+	// With the teacher, it is kept only to be played back in the lesson.
+	if a.win != nil && !a.teacher.on {
 		song := ""
 		if tr := a.pl.Current(); tr != nil {
 			song = tr.Name

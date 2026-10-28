@@ -251,6 +251,9 @@ func (a *app) lessonStatus(c *ui.Context, at, sung int) {
 		text, color = t.err, ui.Hex("#f5a524")
 	case t.aligning:
 		text = "正在对齐你唱的和原曲…"
+	case t.rec != nil && a.teacher.on:
+		// The teacher hears them as they sing: nothing kept to show.
+		text, color = line+" · 跟着唱 · 老师在听", white.Alpha(0.85)
 	case t.rec != nil:
 		t.rec.mu.Lock()
 		got := len(t.rec.samples)
@@ -340,12 +343,17 @@ func (a *app) lessonDock(c *ui.Context, lines []lyrics.Line, at int) {
 	})
 }
 
-// bigButton starts from line at, red as recording does, or, while the
-// lesson plays or records, stops it, a square on white: a ring round it
-// swelling with the voice the microphone hears.
+// bigButton starts from line at, red as recording does, green with the
+// teacher, who listens rather than records, or, while the lesson plays or
+// records, stops it, a square on white: a ring round it swelling with the
+// voice the microphone hears.
 func (a *app) bigButton(c *ui.Context, at int) {
 	t := &a.lesson.takes
 	busy := a.lessonBusy()
+	accent := recordRed
+	if a.teacher.on {
+		accent = teacherGreen
+	}
 	chosen, _ := a.pl.Line()
 	label, tip := "开始唱", "先听这一句，再跟着唱"
 	switch {
@@ -366,10 +374,10 @@ func (a *app) bigButton(c *ui.Context, at int) {
 			level := t.rec.level
 			t.rec.mu.Unlock()
 			s := 0.8 + 0.45*level
-			ui.Box(c).Absolute().Top(8).Left(8).Size(size, size).Radius(size/2).Background(recordRed.Alpha(0.35)).Scale(s, s).PassThrough()
+			ui.Box(c).Absolute().Top(8).Left(8).Size(size, size).Radius(size/2).Background(accent.Alpha(0.35)).Scale(s, s).PassThrough()
 		}
 		b := ui.ButtonBase(c.Key("big-button")).Absolute().Top(8).Left(8).Size(size, size).Radius(size / 2).Center().FocusRing(false).Label(label).Tooltip(tip)
-		bg := recordRed
+		bg := accent
 		if busy {
 			bg = white.Alpha(0.92)
 		}
@@ -443,7 +451,7 @@ func (a *app) settingsButton(c *ui.Context) {
 				a.settings.save()
 			})
 		})
-		setting("自动录音", "跟着唱时把你录下来", func() {
+		setting("自动录音", "自己练时跟着唱，把你录下来；AI 老师只听不存", func() {
 			choice(c, "自动录音", []choiceOption{{"开", 1}, {"关", 0}}, boolValue(a.settings.AutoRecord), func(v float64) {
 				a.settings.AutoRecord = v == 1
 				a.settings.save()
