@@ -37,8 +37,10 @@ const (
 
 // A Config is how a session goes.
 type Config struct {
-	URL          string // URL if empty
-	Key          string // the DashScope API key
+	// Provider is who the model is of: Gemini, or DashScope if empty.
+	Provider     string
+	URL          string // URL, or GeminiURL, if empty
+	Key          string // the API key of the provider
 	Model, Voice string // DefaultModel and DefaultVoice if empty
 	Instructions string
 	Tools        []Tool

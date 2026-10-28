@@ -1,6 +1,9 @@
 package app
 
 import (
+	"image/png"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,6 +13,7 @@ import (
 	"netease-music-mygo/internal/lyrics"
 	"netease-music-mygo/internal/netease"
 	"netease-music-mygo/internal/player"
+	"netease-music-mygo/internal/teacher"
 )
 
 // A click on a line of the lesson pane plays that line alone; with the
@@ -52,6 +56,36 @@ func TestLessonPanePlaysLine(t *testing.T) {
 	tt.Frame()
 	if n, _ := a.pl.Line(); n != 0 {
 		t.Errorf("after 上一句, line %d", n)
+	}
+}
+
+// The lesson's settings choose whose model the teacher is, and keep it.
+// With NM_FRAMES set, saves them open, in a window of a laptop's height.
+func TestLessonTeacherProvider(t *testing.T) {
+	a := newTestApp()
+	a.settings = defaultSettings()
+	a.pl.Cue([]netease.Track{{ID: 7, Name: "春日影", Duration: 200000}})
+	a.pl.SetLyrics([]lyrics.Line{{At: 10 * time.Second, End: 13 * time.Second, Text: "悴んだ心ふるえる眼差し", Romaji: "ka ji ka n da"}})
+	a.nowPlaying = true
+	a.npPane = paneLesson
+	tt := ui.NewTester(a.view, 1000, 650)
+	tt.Advance(time.Second)
+	tt.Frame()
+	if err := tt.Click("跟唱设置"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if dir := os.Getenv("NM_FRAMES"); dir != "" {
+		f, _ := os.Create(filepath.Join(dir, "lesson-settings.png"))
+		png.Encode(f, tt.Image())
+		f.Close()
+	}
+	if err := tt.Click("AI 老师模型Gemini"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.settings.TeacherProvider != teacher.Gemini {
+		t.Errorf("chose Gemini, provider %q", a.settings.TeacherProvider)
 	}
 }
 

@@ -71,6 +71,11 @@ type settings struct {
 	// it from the Japanese alone.
 	HideRomaji      bool `json:"hideRomaji"`
 	HideTranslation bool `json:"hideTranslation"`
+	// TeacherProvider is whose model the AI teacher is: teacher.Gemini,
+	// or DashScope's if empty.
+	TeacherProvider string `json:"teacherProvider,omitempty"`
+	// TeacherEnglish has the AI teacher speak English, not Chinese.
+	TeacherEnglish bool `json:"teacherEnglish,omitempty"`
 	// CacheMB is how many megabytes the songs kept on disk may take; 0
 	// keeps none.
 	CacheMB int `json:"cacheMB"`

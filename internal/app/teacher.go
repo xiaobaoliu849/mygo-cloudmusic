@@ -35,6 +35,13 @@ type teacherSession interface {
 
 // dialTeacher connects to the teacher; tests swap it.
 var dialTeacher = func(cfg teacher.Config, got func(teacher.Event)) (teacherSession, error) {
+	if cfg.Provider == teacher.Gemini {
+		s, err := teacher.DialGemini(cfg, got)
+		if err != nil {
+			return nil, err
+		}
+		return s, nil
+	}
 	s, err := teacher.Dial(cfg, got)
 	if err != nil {
 		return nil, err
@@ -42,26 +49,42 @@ var dialTeacher = func(cfg teacher.Config, got func(teacher.Event)) (teacherSess
 	return s, nil
 }
 
-// teacherSecret is what the DashScope API key is kept as, in the system's
-// credential store.
-const teacherSecret = "dashscope-api-key"
+// teacherSecret is what the API key of provider is kept as, in the
+// system's credential store, and teacherEnv what it may be set as in the
+// environment instead.
+func teacherSecret(provider string) string {
+	if provider == teacher.Gemini {
+		return "gemini-api-key"
+	}
+	return "dashscope-api-key"
+}
 
-// teacherKey is the DashScope API key the teacher connects with: from the
-// environment if it is set there, else as the listener pasted it, kept
+func teacherEnv(provider string) string {
+	if provider == teacher.Gemini {
+		return "GEMINI_API_KEY"
+	}
+	return "DASHSCOPE_API_KEY"
+}
+
+// teacherKey is the API key of provider the teacher connects with: from
+// the environment if it is set there, else as the listener pasted it, kept
 // in the system's credential store rather than in the app's files.
-var teacherKey = func() string {
-	if key := os.Getenv("DASHSCOPE_API_KEY"); key != "" {
+var teacherKey = func(provider string) string {
+	if key := os.Getenv(teacherEnv(provider)); key != "" {
 		return key
 	}
-	b, err := mygo.Secrets.Get(teacherSecret)
+	b, err := mygo.Secrets.Get(teacherSecret(provider))
 	if err != nil {
 		return ""
 	}
 	return string(b)
 }
 
-// saveTeacherKey keeps the key the listener pasted; tests swap it.
-var saveTeacherKey = func(key string) error { return mygo.Secrets.Set(teacherSecret, []byte(key)) }
+// saveTeacherKey keeps the key of provider the listener pasted; tests swap
+// it.
+var saveTeacherKey = func(provider, key string) error {
+	return mygo.Secrets.Set(teacherSecret(provider), []byte(key))
+}
 
 // teacherState is the AI teacher: a voice model the listener talks with,
 // which runs the lesson through the tools the app gives it, playing a
@@ -84,6 +107,9 @@ type teacherState struct {
 	// drop says the teacher's next response, still to begin, is to be
 	// dropped: its answer to a take beginning, or to a stray sound in one.
 	drop bool
+	// take says a take the teacher asked for goes on, the line not yet
+	// heard sung.
+	take bool
 	// reply is what the teacher says in the response on its way, and
 	// replyCalls how many tools it calls in it.
 	reply      string
@@ -187,12 +213,13 @@ func (a *app) teacherYield() {
 		}
 		c.busy = nil
 	}
-	t.saying = false
+	// A take the teacher asked for, the listener stopped or started over.
+	t.saying, t.take = false, false
 }
 
 // startTeacher connects to the teacher, or, with no API key, asks for one.
 func (a *app) startTeacher() {
-	key := teacherKey()
+	key := teacherKey(a.settings.TeacherProvider)
 	if key == "" {
 		a.stopTeacher()
 		a.teacher.ask, a.teacher.err = true, ""
@@ -209,7 +236,7 @@ func (a *app) pasteTeacherKey() {
 		return
 	}
 	t.key = ""
-	err := saveTeacherKey(key)
+	err := saveTeacherKey(a.settings.TeacherProvider, key)
 	a.connectTeacher(key)
 	if err != nil {
 		t.err = "API Key 存不进系统的凭据管理器，这次能用，下次还要再粘贴：" + err.Error()
@@ -225,7 +252,7 @@ func (a *app) connectTeacher(key string) {
 	t.on, t.err, t.said = true, "", nil
 	gen := t.gen
 	t.song = a.lyricsTrack()
-	cfg := teacher.Config{Key: key, Instructions: a.teacherInstructions(), Tools: teacherTools}
+	cfg := teacher.Config{Provider: a.settings.TeacherProvider, Key: key, Instructions: a.teacherInstructions(), Tools: teacherTools}
 	got := func(e teacher.Event) {
 		a.post(func() {
 			if a.teacher.gen == gen {
@@ -255,6 +282,7 @@ func (a *app) teacherDialed(gen int, s teacherSession, err error) {
 	}
 	if a.win != nil {
 		t.log = openTeacherLog()
+		t.log.printf("provider %s", cmp.Or(a.settings.TeacherProvider, "dashscope"))
 		s = loggedSession{s, t.log}
 	}
 	t.sess = s
@@ -364,7 +392,7 @@ func (a *app) teacherEvent(e teacher.Event) {
 		}
 		// The listener heard in earnest: what was to be dropped is past,
 		// and the answer to this is not to go with it.
-		t.drop = false
+		t.drop, t.take = false, false
 		if e.Text != "" {
 			u := utterance{text: e.Text}
 			if t.saying {
@@ -389,7 +417,10 @@ func (a *app) teacherEvent(e teacher.Event) {
 		t.answering, t.hushed, t.err = true, false, ""
 		t.begun, t.retried = true, false
 		t.reply, t.replyCalls = "", 0
-		if t.drop && t.sess != nil {
+		// An answer begun as the take goes on, nothing of the line heard,
+		// is to nothing: Gemini answered the room's noise, moving on. With
+		// some of it heard, it answers the singing, written down late.
+		if (t.drop || t.take && a.lesson.takes.rec != nil && t.hearing == "") && t.sess != nil {
 			t.drop = false
 			t.sess.Cancel()
 			t.hushed = true
@@ -438,7 +469,11 @@ func (a *app) teacherEvent(e teacher.Event) {
 		}
 		t.answeredAt = teacherNow()
 	case teacher.Failed:
-		t.err = e.Err.Error()
+		// A response asked for again while the one asked for first, slow
+		// to begin, is still to come: nothing went wrong to show.
+		if !strings.Contains(e.Err.Error(), "already has an active response") {
+			t.err = e.Err.Error()
+		}
 	case teacher.Closed:
 		if e.Err != nil {
 			t.err = "和 AI 老师断开了：" + e.Err.Error()
@@ -486,10 +521,14 @@ func promisesToPlay(said string) bool {
 	return playPromise.MatchString(said)
 }
 
-var playPromise = regexp.MustCompile("再放|放一遍|放给你|放第|播放|听一遍|再听|来听|先听|听一下|示范|再来一遍|再来一次|来一遍|开始录|录一下|现在你来唱|轮到你|该你唱|该你了")
+var playPromise = regexp.MustCompile("(?i)再放|放一遍|放给你|放第|播放|听一遍|再听|来听|先听|听一下|示范|再来一遍|再来一次|来一遍|开始录|录一下|现在你来唱|轮到你|该你唱|该你了|下一句|" +
+	`next line|next one|move on|listen (again|to)|let's (hear|listen|try|play)|play it|one more time|your turn`)
+
+// silentTake tells the teacher the take ran out with nothing sung.
+const silentTake = "（系统提醒，不是学生说的：录音时间到了，学生这一句没有唱出声。不要评价，也不要换下一句；简短、换个说法鼓励他跟着唱，然后用 play_line 再放这一句。）"
 
 // playReminder reminds the teacher to call what it said it would play.
-const playReminder = "（系统提醒，不是学生说的：你刚才说要放给学生听或请学生唱，但没有调用工具。现在就调用相应的工具（play_line、loop_line、start_recording 或 play_recording），不要再重复说话。）"
+const playReminder = "（系统提醒，不是学生说的：你刚才说要放给学生听、请学生唱或换下一句，但没有调用工具。现在就调用相应的工具（play_line、loop_line、start_recording、play_recording，下一句先 next_line 再 play_line），不要再重复说话。）"
 
 // teacherSpeaking reports whether the teacher's voice plays.
 func (a *app) teacherSpeaking() bool {
@@ -511,11 +550,25 @@ func (a *app) teacherTick() {
 		t.sess.Instruct(a.teacherInstructions())
 	}
 	a.teacherWatch()
+	recording := t.take && a.lesson.takes.rec != nil
+	if t.take && a.lesson.takes.rec == nil && !t.answering {
+		// The take ran out with the line not heard sung: told so, once
+		// what it answers now is done, the teacher has them sing it again,
+		// rather than moving on.
+		t.take = false
+		t.log.printf("the take ended unheard")
+		t.sess.Tell(silentTake)
+		t.sess.Respond()
+		t.answering = true
+	}
 	speaking := a.teacherSpeaking()
 	if !speaking && !t.answering {
 		a.runCalls()
 	}
-	t.open.Store(!speaking && !t.answering && len(t.calls) == 0 && !a.pl.Playing() && a.lesson.takes.out == nil && !a.vocalsPlaying())
+	// In a take it asked for, it hears the singing even as an answer to
+	// be dropped is on its way: it missed the start of the line, deaf
+	// until that answer was done.
+	t.open.Store(!speaking && (!t.answering || recording) && len(t.calls) == 0 && !a.pl.Playing() && a.lesson.takes.out == nil && !a.vocalsPlaying())
 }
 
 // teacherWatch keeps the conversation from stalling: the listener heard
@@ -529,9 +582,9 @@ func (a *app) teacherWatch() {
 	}
 	t.asked = t.answering
 	switch {
-	case t.answering && !t.begun && !t.retried && !t.hushed && now.Sub(t.lastHeard) > unbegun:
-		// Not one the listener cut short: asked again, it would talk over
-		// what they do.
+	case t.answering && !t.begun && !t.retried && !t.hushed && !t.drop && now.Sub(t.lastHeard) > unbegun:
+		// Not one the listener cut short, nor one to be dropped: asked
+		// again, it would talk over what they do, or over their singing.
 		t.log.printf("the response did not begin: asking again")
 		t.retried, t.lastHeard = true, now
 		t.sess.Respond()
@@ -715,6 +768,7 @@ func (a *app) runTool(c teacher.Call) (any, func() bool) {
 		if a.lesson.takes.rec == nil {
 			return toolError("录不了音：" + a.lesson.takes.err), nil
 		}
+		a.teacher.take = true
 		r := lineFor(lines, n)
 		r["recording"] = "录音已开始，学生在清唱：不要说话，安静地听，他唱完停下时录音自动结束"
 		return r, nil
@@ -834,6 +888,7 @@ func (a *app) lyricsForTeacher() map[string]any {
 func (a *app) teacherInstructions() string {
 	var b strings.Builder
 	b.WriteString(teacherPrompt)
+	b.WriteString(a.teacherLanguage())
 	if a.vocalsReady() {
 		b.WriteString(vocalsPrompt)
 	}
@@ -860,20 +915,33 @@ func (a *app) teacherInstructions() string {
 	return b.String()
 }
 
-// teacherPrompt is how the teacher teaches.
-const teacherPrompt = `你是一位耐心、温暖的声乐老师，在一个音乐播放器里教学生唱歌，一次教一句。始终用简体中文和学生说话，不管学生说的、唱的是日语、英语还是别的语言（歌词本身照原文念）。你自己不唱：原曲就是示范，用工具放给学生听。
+// teacherLanguage is what language the teacher speaks in, as the
+// listener chose.
+func (a *app) teacherLanguage() string {
+	if a.settings.TeacherEnglish {
+		return "\n\nLanguage: always speak to the student in natural, friendly English, even though these instructions and the translations are in Chinese, and even if the student speaks Chinese. Quote the lyrics in their own language, with romaji when it helps. Keep each sentence under 15 words."
+	}
+	return "\n\n说话的语言：始终用简体中文和学生说话，不管学生说的、唱的是日语、英语还是别的语言；歌词本身照原文念。每句不超过 20 个字。"
+}
 
-说话要短：每次最多一句话，不超过 20 个字，不寒暄、不客套、不重复学生看得到的东西。开场只说一句，比如"先听第二句"，就开始放。
+// teacherPrompt is how the teacher teaches.
+const teacherPrompt = `你是一位耐心、温暖的声乐老师，在一个音乐播放器里教学生唱歌，一次教一句。你自己不唱：原曲就是示范，用工具放给学生听。
+
+像真人老师一样自然地说话：每次只说一句短话，不寒暄、不客套、不念学生屏幕上看得到的东西。换着说法，不要重复你上一次说过的话，也不要每次都问同样的问题。开场只说一句就开始放。
 
 一句的教法：
 1. 用 play_line 把这一句放给学生听。它播完才返回，返回前不要说话。
 2. play_line 返回后，什么都不说，直接调用 start_recording（学生屏幕上会显示"跟着唱 · 录音中"），然后安静地听，等学生唱完再说话。
-3. 学生唱完后，只指出最要紧的一个问题，并给一个具体做法，比如"「つづけ」的 tsu 太轻，舌尖顶住上齿再发"；唱得好就说好在哪。不要列一串问题。
-4. 问"再来一遍，还是下一句？"。再来用 play_line 或 loop_line，下一句先 next_line 再 play_line。
+3. 学生唱完后，由你决定下一步，不用每次都问学生：
+   - 唱得不错：具体夸一下好在哪，然后直接 next_line、play_line 教下一句。
+   - 有明显问题：只说最要紧的一个问题和一个具体做法，比如"「つづけ」的 tsu 太轻，舌尖顶住上齿再发"，然后直接 play_line 再放这一句让学生再唱。
+   - 同一句已经练了三遍左右：鼓励一下，进下一句。
+   只有拿不准时才偶尔问学生想再练还是下一句，而且每次换个问法。
+4. 学生说要再来、下一句、放慢，就照做。
 
 学生也可以随时提要求：放慢（slow_down）、听整首（play_song）、听自己唱的（play_recording）。歌词的行号从 1 开始，和学生屏幕上的编号一样。日语歌词可以用假名或罗马音帮学生读准；歌词后方括号里的是网易云给的这句的罗马音，有就照它的读法纠正发音。歌在放的时候你听不到学生说话。
 
-说要放、要录，就在同一次回复里调用 play_line、loop_line 或 start_recording，不要只说不做。
+说要放、要录、要换下一句，就在同一次回复里调用 play_line、loop_line、start_recording 或 next_line，不要只说不做。
 你不会唱歌，不要试着唱：要听唱法，就用 play_line 放原曲，难的句子先用 slow_down 放慢到 0.75。学生要你示范发音时，用日语一个音一个音、慢慢地念，每个音之间停一下，比如「お、も、い、つ、づ、け、て」。`
 
 // teacherTools are the tools the teacher runs the lesson with.

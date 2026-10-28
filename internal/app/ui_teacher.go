@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+
+	"netease-music-mygo/internal/teacher"
 )
 
 // teacherGreen is the green of the teacher on.
@@ -50,12 +52,17 @@ func (a *app) teacherDot() ui.Color {
 	return white.Alpha(0.35)
 }
 
-// teacherKeyForm asks for the DashScope API key, to keep and connect with.
+// teacherKeyForm asks for the API key of the teacher's provider, to keep
+// and connect with.
 func (a *app) teacherKeyForm(c *ui.Context) {
 	t := &a.teacher
-	ui.Text(c, "粘贴阿里云百炼（DashScope）的 API Key。它存在系统的凭据管理器里，不写进任何文件。").FontSize(12.5).LineHeight(1.4).TextColor(white.Alpha(0.6)).MaxLines(2)
+	who, placeholder, label := "阿里云百炼（DashScope）", "sk-…", "DashScope API Key"
+	if a.settings.TeacherProvider == teacher.Gemini {
+		who, placeholder, label = "Google AI Studio（Gemini）", "AIza…", "Gemini API Key"
+	}
+	ui.Text(c, "粘贴"+who+"的 API Key。它存在系统的凭据管理器里，不写进任何文件。").FontSize(12.5).LineHeight(1.4).TextColor(white.Alpha(0.6)).MaxLines(2)
 	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-		in := ui.TextInput(c.Key("api-key"), &t.key).Password().Placeholder("sk-…").Label("DashScope API Key").
+		in := ui.TextInput(c.Key("api-key"), &t.key).Password().Placeholder(placeholder).Label(label).
 			Grow(1).MinWidth(0).Height(34).PaddingX(12).Radius(10).Background(white.Alpha(0.08)).Border(1, white.Alpha(0.15)).FocusRing(false).
 			FontSize(13).TextColor(white).AutoFocus()
 		if in.Submitted() {
@@ -80,19 +87,24 @@ func (a *app) teacherPanel(c *ui.Context) {
 	}
 	// What the teacher does now; listening, the microphone's meter shows
 	// it hears the listener.
-	state, listening := "正在连接 AI 老师…", false
+	// Whose model it is shows, as the lesson's settings choose it.
+	who := "通义"
+	if a.settings.TeacherProvider == teacher.Gemini {
+		who = "Gemini"
+	}
+	state, listening := "正在连接 AI 老师（"+who+"）…", false
 	switch {
 	case t.sess == nil:
 	case a.teacherSpeaking() || t.saying:
-		state = "已连上 · 老师在说"
+		state = "已连上" + who + " · 老师在说"
 	case t.answering || len(t.calls) > 0 && !a.pl.Playing():
-		state = "已连上 · 老师在想"
+		state = "已连上" + who + " · 老师在想"
 	case a.pl.Playing() || a.lesson.takes.out != nil:
-		state = "已连上 · 在放，放完老师再听你说"
+		state = "已连上" + who + " · 在放，放完老师再听你说"
 	case a.lesson.takes.rec != nil:
-		state, listening = "已连上 · 在听你唱", true
+		state, listening = "已连上"+who+" · 在听你唱", true
 	default:
-		state, listening = "已连上 · 在听你说，直接说话就行", true
+		state, listening = "已连上"+who+" · 在听你说，直接说话就行", true
 	}
 	ui.Column(c.Key("teacher-panel")).Gap(6).Margin(6, 8, 0, 8).Padding(10, 14).Radius(14).Background(white.Alpha(0.06)).Children(func() {
 		if t.on {

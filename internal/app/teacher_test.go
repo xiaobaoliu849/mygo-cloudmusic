@@ -47,7 +47,7 @@ func teacherApp(t *testing.T) (*app, *ui.Tester, *fakeMic, *fakeTeacher, func([]
 	f := &fakeTeacher{answers: map[string]any{}}
 	hear := func(s []float32) { m.got(s) }
 	oldKey, oldDial := teacherKey, dialTeacher
-	teacherKey = func() string { return "test-key" }
+	teacherKey = func(string) string { return "test-key" }
 	dialed := make(chan teacher.Config, 1)
 	dialTeacher = func(cfg teacher.Config, got func(teacher.Event)) (teacherSession, error) {
 		dialed <- cfg
@@ -84,9 +84,9 @@ func TestTeacherToggle(t *testing.T) {
 	a, tt, _ := takeApp(t)
 	oldKey, oldSave, oldDial := teacherKey, saveTeacherKey, dialTeacher
 	defer func() { teacherKey, saveTeacherKey, dialTeacher = oldKey, oldSave, oldDial }()
-	teacherKey = func() string { return "" }
+	teacherKey = func(string) string { return "" }
 	var saved string
-	saveTeacherKey = func(key string) error { saved = key; return nil }
+	saveTeacherKey = func(_, key string) error { saved = key; return nil }
 	dialed := make(chan teacher.Config, 1)
 	dialTeacher = func(cfg teacher.Config, got func(teacher.Event)) (teacherSession, error) {
 		dialed <- cfg
@@ -135,7 +135,7 @@ func TestTeacherToggle(t *testing.T) {
 	// Turned on again, it starts a new conversation, showing none of the
 	// last: it greeted twice, the first greeting kept.
 	a.teacher.said = []utterance{{teacher: true, text: "你好"}}
-	teacherKey = func() string { return saved }
+	teacherKey = func(string) string { return saved }
 	tt.Click("AI 老师")
 	tt.Frame()
 	select {
@@ -623,6 +623,64 @@ func TestTeacherAsksAgainForResponseNotBegun(t *testing.T) {
 	}
 }
 
+// A take the teacher asked for, with nothing sung, neither has the teacher
+// answer the room's noise while it goes on, nor move on once it runs out:
+// told the line was not sung, it has the listener sing it again. Gemini
+// moved on to the next line when nothing was sung.
+func TestTeacherSilentTake(t *testing.T) {
+	a, _, _, f, _ := teacherApp(t)
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "r", Name: "start_recording"}})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	// Its answer as the take begins on its way, it hears the singing: it
+	// missed the start of the line, deaf until that answer was done.
+	a.teacherTick()
+	if !a.teacher.open.Load() {
+		t.Error("deaf as the take began")
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	// An answer to nothing heard, as the take goes on.
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	if !a.teacher.hushed {
+		t.Error("answered the room's noise as the take went on")
+	}
+	// The take runs out as that answer goes on: it is told once it ends.
+	responded := f.responded
+	a.stopRecording() // as it does, run out
+	a.teacherTick()
+	if f.responded != responded {
+		t.Error("told the line was not sung as it answered something else")
+	}
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	if f.responded != responded+1 || len(f.told) == 0 || f.told[len(f.told)-1] != silentTake {
+		t.Fatalf("not told the line was not sung: responded %d, told %q", f.responded-responded, f.told)
+	}
+	a.teacherTick()
+	if f.responded != responded+1 {
+		t.Error("told more than once")
+	}
+}
+
+// The teacher's answer to the line sung, begun before what was sung is
+// written down, as DashScope does at times, is not taken for an answer to
+// noise: some of the line was heard as it went.
+func TestTeacherAnswersSingingWrittenDownLate(t *testing.T) {
+	a, _, m, _, _ := teacherApp(t)
+	a.teacherEvent(teacher.Event{Kind: teacher.Calling, Call: teacher.Call{ID: "r", Name: "start_recording"}})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	a.teacherTick()
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answered})
+	m.sing(2 * time.Second)
+	a.teacherEvent(teacher.Event{Kind: teacher.Hearing, Text: "世界で僕は"})
+	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
+	if a.teacher.hushed {
+		t.Error("the answer to the line sung was dropped")
+	}
+}
+
 // The answer to a take beginning, waited for in vain, is not dropped in
 // place of the answer to the line sung: the teacher said nothing of it.
 func TestTeacherDropsNoLaterAnswer(t *testing.T) {
@@ -644,6 +702,18 @@ func TestTeacherDropsNoLaterAnswer(t *testing.T) {
 	a.teacherEvent(teacher.Event{Kind: teacher.Answering})
 	if a.teacher.hushed {
 		t.Error("the answer to the line sung was dropped")
+	}
+}
+
+// "好，下一句。" with nothing called is reminded to move on: it was not,
+// and the listener waited in silence; asking which, it is not.
+func TestTeacherRemindedToMoveOn(t *testing.T) {
+	if !promisesToPlay("好，下一句。") || promisesToPlay("再来一遍，还是下一句？") {
+		t.Error("moving on, or asking whether to, taken the wrong way")
+	}
+	// Speaking English, the same.
+	if !promisesToPlay("Nice! Let's move on to the next line.") || promisesToPlay("Want to try the next line?") {
+		t.Error("moving on in English, or asking whether to, taken the wrong way")
 	}
 }
 

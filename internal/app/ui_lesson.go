@@ -10,6 +10,7 @@ import (
 	"netease-music-mygo/internal/mic"
 	"netease-music-mygo/internal/netease"
 	"netease-music-mygo/internal/player"
+	"netease-music-mygo/internal/teacher"
 )
 
 // lessonState is the lesson pane: the listener learns a song a line at a
@@ -446,6 +447,30 @@ func (a *app) settingsButton(c *ui.Context) {
 			choice(c, "自动录音", []choiceOption{{"开", 1}, {"关", 0}}, boolValue(a.settings.AutoRecord), func(v float64) {
 				a.settings.AutoRecord = v == 1
 				a.settings.save()
+			})
+		})
+		setting("AI 老师", "用谁的模型，各要各的 API Key", func() {
+			cur := boolValue(a.settings.TeacherProvider == teacher.Gemini)
+			choice(c, "AI 老师模型", []choiceOption{{"通义", 0}, {"Gemini", 1}}, cur, func(v float64) {
+				a.settings.TeacherProvider = ""
+				if v == 1 {
+					a.settings.TeacherProvider = teacher.Gemini
+				}
+				a.settings.save()
+				// On, or asking for a key, it starts over with the other.
+				if a.teacher.on || a.teacher.ask {
+					a.startTeacher()
+				}
+			})
+		})
+		setting("老师说", "AI 老师用什么语言和你说话", func() {
+			choice(c, "老师说", []choiceOption{{"中文", 0}, {"English", 1}}, boolValue(a.settings.TeacherEnglish), func(v float64) {
+				a.settings.TeacherEnglish = v == 1
+				a.settings.save()
+				// On, it starts over speaking the other.
+				if a.teacher.on {
+					a.startTeacher()
+				}
 			})
 		})
 		setting("罗马音", "歌词下面标出怎么念", func() {

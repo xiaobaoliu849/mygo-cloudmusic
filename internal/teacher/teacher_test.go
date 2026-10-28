@@ -18,7 +18,7 @@ import (
 // fakeModel stands in for DashScope: it records what the session sends,
 // and sends what the test gives it.
 type fakeModel struct {
-	auth, model string
+	auth, model, key string
 	got         chan map[string]any
 	send        chan any
 }
@@ -40,7 +40,7 @@ func newFakeModel(t *testing.T) (*fakeModel, string) {
 		}
 	}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f.auth, f.model = r.Header.Get("Authorization"), r.URL.Query().Get("model")
+		f.auth, f.model, f.key = r.Header.Get("Authorization"), r.URL.Query().Get("model"), r.URL.Query().Get("key")
 		ws.ServeHTTP(w, r)
 	}))
 	t.Cleanup(srv.Close)
